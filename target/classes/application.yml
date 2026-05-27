@@ -1,0 +1,59 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: db-adapter-assistant
+
+  # H2 内嵌数据库（数据持久化到文件）
+  datasource:
+    url: jdbc:h2:file:./data/db-adapter;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  h2:
+    console:
+      enabled: true          # 开发期可访问 /h2-console
+      path: /h2-console
+
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: update       # 自动建表/升级
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+  # 静态资源
+  web:
+    resources:
+      static-locations: classpath:/static/
+      cache:
+        period: 0            # 开发期禁用缓存
+
+  # 关闭不必要的 MVC 配置
+  mvc:
+    pathmatch:
+      use-suffix-pattern: false
+
+# Claude CLI 配置
+claude:
+  # claude 命令路径，可以是绝对路径如 /usr/local/bin/claude
+  cli-path: C:/Users/admin/AppData/Roaming/npm/claude
+  # Skill 文件目录（内网 Skill 规则放这里，已废弃，改用全局 Skill）
+  skill-dir: ./skills
+  # 每次 claude 调用的超时时间（毫秒）
+  timeout-ms: 300000
+  # 最大并发 claude 进程数
+  max-concurrent: 3
+  # 是否启用 claude 全局 Skill（~/.claude/CLAUDE.md 和 ~/.claude/skills/）
+  # true: 使用全局 Skill + --append-system-prompt 追加数据库上下文
+  # false: 不加载全局 Skill，只使用 --append-system-prompt
+  global-skill-enabled: true
+
+logging:
+  level:
+    com.dbadapter: DEBUG
+    root: INFO

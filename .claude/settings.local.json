@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn clean *)",
+      "Bash(cmd.exe /c \"C:\\\\Users\\\\admin\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd\" --version)",
+      "Bash(C:\\\\Users\\\\admin\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd *)"
+    ]
+  }
+}
