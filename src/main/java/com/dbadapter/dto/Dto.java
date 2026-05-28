@@ -43,6 +43,7 @@ public class Dto {
         private String dbPort;
         private String dbName;
         private String projectPath;
+        private String status;
         private LocalDateTime createdAt;
         private LocalDateTime updatedAt;
 
@@ -55,6 +56,7 @@ public class Dto {
             r.dbPort = s.getDbPort();
             r.dbName = s.getDbName();
             r.projectPath = s.getProjectPath();
+            r.status = s.getStatus();
             r.createdAt = s.getCreatedAt();
             r.updatedAt = s.getUpdatedAt();
             return r;

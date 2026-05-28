@@ -15,10 +15,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
@@ -26,7 +26,11 @@ import java.util.concurrent.Executors;
 import java.util.regex.*;
 
 /**
- * 对话服务 - 使用持久 claude 进程，支持真正的多轮交互
+ * 对话服务 - 两阶段工作流
+ *
+ * 分析阶段 (analysis)：AI 只读文件、输出适配方案，捕获到的修改标记为 proposed(applied=false)
+ *                      若 AI 违规修改了文件，自动回滚实际修改
+ * 执行阶段 (execution)：AI 根据确认方案执行修改，捕获到的修改标记为 applied(applied=true)
  */
 @Slf4j
 @Service
@@ -39,7 +43,6 @@ public class ChatService {
     private final ClaudeSessionManager sessionManager;
     private final ObjectMapper objectMapper;
 
-    // 使用线程池替代虚拟线程
     private final ExecutorService executorService = Executors.newCachedThreadPool(r -> {
         Thread thread = new Thread(r);
         thread.setDaemon(true);
@@ -56,24 +59,24 @@ public class ChatService {
      * 用户发消息，转发给对应的 claude 持久进程，SSE 流式推送回复
      */
     public SseEmitter handleChat(String sessionId, String userMessage) {
-        SseEmitter emitter = new SseEmitter(300_000L); // 5 分钟（AI 操作文件可能较慢）
+        SseEmitter emitter = new SseEmitter(300_000L);
 
         if (!sessionRepo.existsById(sessionId)) {
             sendError(emitter, "会话不存在");
             return emitter;
         }
 
-        // 保存用户消息
         saveMessage(sessionId, "user", userMessage);
 
-        // 异步：获取/创建 claude 进程，发消息，流式推送
         executorService.submit(() -> {
             try {
-                // 如果正在处理，拒绝新消息
                 if (sessionManager.isProcessing(sessionId)) {
                     sendError(emitter, "当前有消息正在处理中，请等待完成后再发送");
                     return;
                 }
+
+                Session session = sessionRepo.findById(sessionId).orElse(null);
+                boolean isAnalysis = session != null && "analysis".equals(session.getStatus());
 
                 ClaudeCliService.ClaudeSession claudeSession = sessionManager.getOrCreate(sessionId);
                 StringBuilder fullText = new StringBuilder();
@@ -81,7 +84,6 @@ public class ChatService {
 
                 claudeSession.sendMessage(
                         userMessage,
-                        // onChunk：每收到文本片段
                         chunk -> {
                             fullText.append(chunk);
                             try {
@@ -89,22 +91,22 @@ public class ChatService {
                                         .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
                             } catch (Exception ignored) {}
                         },
-                        // onToolUse：收到工具调用事件
                         toolUse -> {
                             toolUseEvents.add(toolUse);
                             log.info("捕获工具调用: {} (id={})", toolUse.name, toolUse.toolUseId);
                         },
-                        // onDone：本轮回复完成
                         done -> {
                             try {
                                 ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
 
-                                // 从工具调用事件捕获文件修改
-                                List<Dto.ModificationItem> mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
-
-                                // 兜底：解析 markdown JSON 格式的修改建议
-                                if (mods.isEmpty()) {
-                                    mods = parseAndSaveDiffs(sessionId, fullText.toString());
+                                List<Dto.ModificationItem> mods;
+                                if (isAnalysis) {
+                                    mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
+                                } else {
+                                    mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
+                                    if (mods.isEmpty()) {
+                                        mods = parseAndSaveDiffs(sessionId, fullText.toString());
+                                    }
                                 }
 
                                 emitter.send(SseEmitter.event()
@@ -115,7 +117,6 @@ public class ChatService {
                                 emitter.completeWithError(e);
                             }
                         },
-                        // onError
                         err -> {
                             saveMessage(sessionId, "system", "❌ " + err);
                             sendError(emitter, err);
@@ -132,7 +133,7 @@ public class ChatService {
     }
 
     /**
-     * 重置 claude 会话（强制重建进程，清空 claude 的上下文记忆）
+     * 重置 claude 会话
      */
     public SseEmitter resetAndChat(String sessionId, String userMessage) {
         SseEmitter emitter = new SseEmitter(300_000L);
@@ -147,6 +148,9 @@ public class ChatService {
 
         executorService.submit(() -> {
             try {
+                Session session = sessionRepo.findById(sessionId).orElse(null);
+                boolean isAnalysis = session != null && "analysis".equals(session.getStatus());
+
                 ClaudeCliService.ClaudeSession claudeSession = sessionManager.restart(sessionId);
                 StringBuilder fullText = new StringBuilder();
                 List<ClaudeCliService.ToolUseEvent> toolUseEvents = new ArrayList<>();
@@ -168,12 +172,14 @@ public class ChatService {
                             try {
                                 ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
 
-                                // 从工具调用事件捕获文件修改
-                                List<Dto.ModificationItem> mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
-
-                                // 兜底：解析 markdown JSON 格式的修改建议
-                                if (mods.isEmpty()) {
-                                    mods = parseAndSaveDiffs(sessionId, fullText.toString());
+                                List<Dto.ModificationItem> mods;
+                                if (isAnalysis) {
+                                    mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
+                                } else {
+                                    mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
+                                    if (mods.isEmpty()) {
+                                        mods = parseAndSaveDiffs(sessionId, fullText.toString());
+                                    }
                                 }
 
                                 emitter.send(SseEmitter.event()
@@ -205,10 +211,148 @@ public class ChatService {
         return messageRepo.save(msg);
     }
 
-    // ==================== 工具调用捕获文件修改 ====================
+    // ==================== 分析阶段：捕获为 proposed，回滚实际修改 ====================
 
     /**
-     * 从工具调用事件中捕获文件修改（Edit/Write 工具）
+     * 分析阶段：将捕获到的修改标记为 proposed（applied=false），
+     * 并回滚 AI 违规实际修改的文件
+     */
+    private List<Dto.ModificationItem> captureProposedModifications(
+            String sessionId, List<ClaudeCliService.ToolUseEvent> toolUseEvents, String fullText) {
+
+        List<Dto.ModificationItem> result = new ArrayList<>();
+        Session session = sessionRepo.findById(sessionId).orElse(null);
+        String projectPath = session != null ? session.getProjectPath() : null;
+
+        // 1. 从工具调用事件捕获
+        for (ClaudeCliService.ToolUseEvent toolUse : toolUseEvents) {
+            try {
+                if ("Edit".equals(toolUse.name) || "Write".equals(toolUse.name)) {
+                    String filePath = toolUse.input.path("file_path").asText();
+                    if (filePath.isEmpty()) continue;
+
+                    String absPath = resolveFilePath(projectPath, filePath);
+
+                    // 回滚 AI 违规的文件修改
+                    revertUnauthorizedModification(toolUse, absPath);
+
+                    String description = "Edit".equals(toolUse.name)
+                            ? "建议替换内容" : "建议创建文件";
+
+                    String originalContent = "";
+                    String modifiedContent = "";
+
+                    if ("Edit".equals(toolUse.name)) {
+                        originalContent = toolUse.input.path("old_string").asText("");
+                        modifiedContent = toolUse.input.path("new_string").asText("");
+                    } else if ("Write".equals(toolUse.name)) {
+                        modifiedContent = toolUse.input.path("content").asText("");
+                    }
+
+                    FileDiff diff = new FileDiff();
+                    diff.setSessionId(sessionId);
+                    diff.setFilePath(absPath);
+                    diff.setDescription(description);
+                    diff.setOriginalContent(originalContent);
+                    diff.setModifiedContent(modifiedContent);
+                    diff.setApplied(false);   // 标记为"待确认"
+                    diff.setAutoApplied(false);
+                    diffRepo.save(diff);
+
+                    Dto.ModificationItem mod = new Dto.ModificationItem();
+                    mod.setFilePath(filePath);
+                    mod.setDescription(description);
+                    mod.setOriginal(originalContent);
+                    mod.setModified(modifiedContent);
+                    result.add(mod);
+
+                    log.info("分析阶段 - 捕获修改建议: {} ({})", absPath, description);
+                }
+            } catch (Exception e) {
+                log.warn("处理工具调用事件失败: {}", e.getMessage());
+            }
+        }
+
+        // 2. 兜底：从 AI 回复的 JSON 解析
+        if (result.isEmpty()) {
+            result = parseAndSaveDiffsAsProposed(sessionId, fullText);
+        }
+
+        return result;
+    }
+
+    /**
+     * 回滚 AI 在分析阶段违规实际修改的文件
+     */
+    private void revertUnauthorizedModification(ClaudeCliService.ToolUseEvent toolUse, String absPath) {
+        try {
+            Path path = Path.of(absPath);
+            if (!Files.exists(path)) return;
+
+            if ("Edit".equals(toolUse.name)) {
+                String oldString = toolUse.input.path("old_string").asText("");
+                String newString = toolUse.input.path("new_string").asText("");
+                if (!oldString.isEmpty() && !newString.isEmpty()) {
+                    String content = Files.readString(path, StandardCharsets.UTF_8);
+                    if (content.contains(newString)) {
+                        String reverted = content.replaceFirst(
+                                java.util.regex.Pattern.quote(newString), oldString);
+                        Files.writeString(path, reverted, StandardCharsets.UTF_8);
+                        log.warn("分析阶段 - 已回滚 AI 违规修改: {}", absPath);
+                    }
+                }
+            }
+            // Write 工具创建的新文件：无法自动回滚（不知道原内容），记录警告
+            if ("Write".equals(toolUse.name)) {
+                log.warn("分析阶段 - AI 违规创建了文件: {}，无法自动回滚，请人工检查", absPath);
+            }
+        } catch (Exception e) {
+            log.error("回滚违规修改失败: {}", absPath, e);
+        }
+    }
+
+    /**
+     * 从 AI 回复的 JSON 解析修改建议，保存为 proposed（applied=false）
+     */
+    private List<Dto.ModificationItem> parseAndSaveDiffsAsProposed(String sessionId, String fullText) {
+        List<Dto.ModificationItem> result = new ArrayList<>();
+        Matcher matcher = MODIFICATIONS_PATTERN.matcher(fullText);
+        if (!matcher.find()) return result;
+
+        String jsonBlock = matcher.group()
+                .replaceAll("^```json\\s*", "")
+                .replaceAll("\\s*```$", "")
+                .trim();
+        try {
+            Dto.ModificationList modList = objectMapper.readValue(jsonBlock, Dto.ModificationList.class);
+            if (modList.getModifications() == null) return result;
+
+            Session session = sessionRepo.findById(sessionId).orElse(null);
+            for (Dto.ModificationItem mod : modList.getModifications()) {
+                String absPath = resolveFilePath(
+                        session != null ? session.getProjectPath() : null, mod.getFilePath());
+                FileDiff diff = new FileDiff();
+                diff.setSessionId(sessionId);
+                diff.setFilePath(absPath);
+                diff.setDescription(mod.getDescription());
+                diff.setOriginalContent(mod.getOriginal());
+                diff.setModifiedContent(mod.getModified());
+                diff.setApplied(false);   // 待确认
+                diff.setAutoApplied(false);
+                diffRepo.save(diff);
+                result.add(mod);
+            }
+            log.info("分析阶段 - 解析到 {} 处修改建议（待确认）", result.size());
+        } catch (Exception e) {
+            log.warn("解析修改建议 JSON 失败: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    // ==================== 执行阶段：捕获为已应用 ====================
+
+    /**
+     * 执行阶段：从工具调用事件中捕获文件修改（Edit/Write 工具），标记为已应用
      */
     private List<Dto.ModificationItem> captureFileModificationsFromTools(
             String sessionId, List<ClaudeCliService.ToolUseEvent> toolUseEvents) {
@@ -223,11 +367,9 @@ public class ChatService {
                     String filePath = toolUse.input.path("file_path").asText();
                     if (filePath.isEmpty()) continue;
 
-                    // 解析绝对路径
                     String absPath = resolveFilePath(projectPath, filePath);
                     Path path = Path.of(absPath);
 
-                    // 读取修改后的内容（claude 已经执行了工具）
                     String modifiedContent = "";
                     String originalContent = "";
 
@@ -239,13 +381,10 @@ public class ChatService {
                         }
                     }
 
-                    // 尝试从备份读取原始内容（如果有）
-                    // 注意：claude 的 Edit 工具不会自动备份，这里我们标记为"已应用"
                     String description = "Edit".equals(toolUse.name)
                             ? "Claude 编辑了文件"
                             : "Claude 创建了文件";
 
-                    // 对于 Edit 工具，尝试从 input 中提取 old_string
                     if ("Edit".equals(toolUse.name)) {
                         originalContent = toolUse.input.path("old_string").asText("");
                         String newString = toolUse.input.path("new_string").asText("");
@@ -254,15 +393,23 @@ public class ChatService {
                         }
                     }
 
+                    // 创建备份
+                    String backupPath = null;
+                    if (Files.exists(path)) {
+                        backupPath = absPath + ".bak." + System.currentTimeMillis();
+                        Files.copy(path, Path.of(backupPath), StandardCopyOption.REPLACE_EXISTING);
+                    }
+
                     FileDiff diff = new FileDiff();
                     diff.setSessionId(sessionId);
                     diff.setFilePath(absPath);
                     diff.setDescription(description);
                     diff.setOriginalContent(originalContent);
                     diff.setModifiedContent(modifiedContent);
-                    diff.setApplied(true); // claude 已直接修改
-                    diff.setAutoApplied(true); // 标记为自动应用
+                    diff.setApplied(true);
+                    diff.setAutoApplied(true);
                     diff.setAppliedAt(LocalDateTime.now());
+                    diff.setBackupPath(backupPath);
                     diffRepo.save(diff);
 
                     Dto.ModificationItem mod = new Dto.ModificationItem();
@@ -272,7 +419,7 @@ public class ChatService {
                     mod.setModified(modifiedContent);
                     result.add(mod);
 
-                    log.info("捕获文件修改: {} ({})", absPath, description);
+                    log.info("执行阶段 - 捕获文件修改: {} ({})", absPath, description);
                 }
             } catch (Exception e) {
                 log.warn("处理工具调用事件失败: {}", e.getMessage());
@@ -282,11 +429,8 @@ public class ChatService {
         return result;
     }
 
-    // ==================== Diff 解析（兜底） ====================
+    // ==================== Diff 解析（兜底，执行阶段用） ====================
 
-    /**
-     * 从 AI 回复中解析修改建议 JSON，存入数据库（兜底机制）
-     */
     private List<Dto.ModificationItem> parseAndSaveDiffs(String sessionId, String fullText) {
         List<Dto.ModificationItem> result = new ArrayList<>();
         Matcher matcher = MODIFICATIONS_PATTERN.matcher(fullText);
@@ -310,6 +454,7 @@ public class ChatService {
                 diff.setDescription(mod.getDescription());
                 diff.setOriginalContent(mod.getOriginal());
                 diff.setModifiedContent(mod.getModified());
+                diff.setApplied(false);
                 diffRepo.save(diff);
                 result.add(mod);
             }

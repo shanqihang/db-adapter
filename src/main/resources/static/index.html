@@ -35,6 +35,7 @@
       <div class="topbar-left">
         <button class="btn-icon" id="btnToggleSidebar" title="收起侧栏">☰</button>
         <span class="session-title" id="currentSessionName">请选择或新建会话</span>
+        <span class="phase-badge" id="phaseBadge" style="display:none"></span>
       </div>
       <div class="topbar-right">
         <button class="btn-tab active" id="tabChat" onclick="switchTab('chat')">💬 对话</button>
@@ -55,12 +56,22 @@
               <div class="tip">🔍 自动扫描项目文件</div>
               <div class="tip">🤖 AI 驱动适配建议</div>
               <div class="tip">📝 记录修改前后对比</div>
-              <div class="tip">✅ 一键应用修改</div>
+              <div class="tip">✅ 确认后执行修改</div>
             </div>
           </div>
         </div>
 
         <div class="chat-toolbar" id="chatToolbar" style="display:none">
+          <!-- 工作流按钮组 -->
+          <button class="tool-btn tool-btn-primary" id="btnStartAnalysis" onclick="startAnalysis()" title="启动 AI 分析项目并生成适配方案">
+            <span>🚀</span> 开始分析
+          </button>
+          <button class="tool-btn tool-btn-success" id="btnConfirmPlan" onclick="confirmPlan()" style="display:none" title="确认方案，进入执行阶段">
+            <span>✅</span> 确认方案
+          </button>
+          <button class="tool-btn tool-btn-success" id="btnApplyAll" onclick="applyAllDiffs()" style="display:none" title="批量应用所有已确认的修改">
+            <span>⚡</span> 执行修改
+          </button>
           <button class="tool-btn" id="btnScan" onclick="scanProject()">
             <span>🔍</span> 扫描项目
           </button>
@@ -69,8 +80,11 @@
             <span class="proc-dot" id="procDot"></span>
             <span class="proc-label" id="procLabel">未启动</span>
           </div>
-          <button class="tool-btn tool-btn-warn" id="btnReset" onclick="resetSession()" title="关闭当前 claude 进程并重新启动，清空 AI 上下文记忆">
+          <button class="tool-btn tool-btn-warn" id="btnReset" onclick="resetSession()" title="关闭当前 claude 进程并重新启动">
             <span>🔄</span> 重置会话
+          </button>
+          <button class="tool-btn tool-btn-danger" id="btnTerminate" onclick="terminateSession()" title="终止会话并回滚本轮所有修改">
+            <span>⛔</span> 终止会话
           </button>
         </div>
 

@@ -4,18 +4,115 @@ import com.dbadapter.entity.Session;
 import org.springframework.stereotype.Component;
 
 /**
- * 构建数据库适配的 System Prompt（追加到 Skill 文件之后）
+ * 构建数据库适配的 System Prompt
  *
- * 注意：主要的 Skill 规则通过 --system-prompt-file 加载（内网私有 Skill）。
- *       此处仅追加当前会话的上下文信息（数据库类型、地址、项目路径等）。
- *
- * 如果内网暂时没有 Skill 文件，此处会提供内建的基础规则兜底。
+ * 两阶段工作流：
+ *   分析阶段 (analysis)：只读取文件、输出适配方案，严禁使用 Edit/Write 工具修改任何文件
+ *   执行阶段 (execution)：根据用户确认的方案，实际修改项目文件
  */
 @Component
 public class SkillPromptBuilder {
 
+    // ==================== 分析阶段提示词 ====================
+
     /**
-     * 构建追加到 Skill 后面的上下文提示
+     * 分析阶段：强约束，禁止修改文件
+     */
+    public String buildAnalysisPrompt(Session session) {
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("""
+                # 当前模式：分析模式（ANALYSIS MODE）
+
+                ## ⚠️ 严格规则 — 必须遵守
+
+                你现在处于**分析模式**，这意味着：
+                - ✅ 允许使用 Read、Grep、Glob 工具读取和搜索项目文件
+                - ❌ **严禁使用 Edit、Write、NotebookEdit 工具修改任何文件**
+                - ❌ **严禁对项目文件做任何写入操作**
+
+                如果违反此规则直接修改文件，用户的代码将被破坏，这是绝对不可接受的。
+
+                ## 你的任务
+
+                1. **扫描和分析**：仔细阅读项目的 pom.xml、配置文件、Mapper XML、Java 配置类等
+                2. **识别问题**：找出所有需要适配的数据库相关代码
+                3. **输出适配方案**：在回复末尾以 JSON 格式列出所有需要修改的内容
+
+                ## 输出格式
+
+                分析完成后，必须在回复末尾附加如下 JSON 块：
+
+                ```json
+                {
+                  "modifications": [
+                    {
+                      "filePath": "相对于项目根目录的路径，如 pom.xml 或 src/main/resources/application.yml",
+                      "description": "修改说明（详细描述为什么要改、改成什么）",
+                      "original": "文件中需要被替换的原始内容（必须精确匹配）",
+                      "modified": "替换后的新内容"
+                    }
+                  ]
+                }
+                ```
+
+                规则：
+                - `original` 必须与文件内容**完全一致**（用于后续精确替换）
+                - 一个文件可以有多条 modification
+                - 如果没有需要修改的内容，不输出 JSON 块
+                - 使用中文回答，代码保持原语言
+                - 先给出文字分析说明，再给出 JSON 修改方案
+
+                """);
+
+        sb.append(buildContextPrompt(session));
+        sb.append("\n");
+        sb.append(getDbSpecificRules(session.getDbType()));
+
+        return sb.toString();
+    }
+
+    // ==================== 执行阶段提示词 ====================
+
+    /**
+     * 执行阶段：根据确认的方案执行修改
+     */
+    public String buildExecutionPrompt(Session session, String approvedPlanSummary) {
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("""
+                # 当前模式：执行模式（EXECUTION MODE）
+
+                ## 你的任务
+
+                用户已确认了以下适配方案，请按照方案**逐项执行修改**：
+                - 使用 Edit 或 Write 工具修改项目文件
+                - 严格按照方案中的 original 和 modified 内容进行替换
+                - 每完成一处修改，简要确认
+                - 如果执行中发现方案有不合理之处，先说明问题再决定是否继续
+
+                ## 注意事项
+                - 修改前确保 original 内容与文件实际内容匹配
+                - 保持代码风格与原项目一致
+                - 使用中文说明，代码保持原语言
+
+                """);
+
+        if (approvedPlanSummary != null && !approvedPlanSummary.isBlank()) {
+            sb.append("## 用户确认的适配方案\n\n");
+            sb.append(approvedPlanSummary);
+            sb.append("\n\n");
+        }
+
+        sb.append(buildContextPrompt(session));
+
+        return sb.toString();
+    }
+
+    // ==================== 通用上下文（追加到 Skill 后面） ====================
+
+    /**
+     * 构建追加到 Skill 后面的上下文提示（数据库类型、地址等）
      */
     public String buildContextPrompt(Session session) {
         StringBuilder sb = new StringBuilder();
@@ -37,53 +134,13 @@ public class SkillPromptBuilder {
             sb.append("- **项目路径**: ").append(session.getProjectPath()).append("\n");
         }
 
-        sb.append("\n");
-        sb.append(getDbSpecificRules(session.getDbType()));
-        sb.append("\n");
-        sb.append(getOutputFormatRules());
-
         return sb.toString();
     }
 
-    /**
-     * 完整的兜底系统提示（当没有外部 Skill 文件时使用）
-     * 通过 --system-prompt 替换默认提示
-     */
-    public String buildFullSystemPrompt(Session session) {
-        StringBuilder sb = new StringBuilder();
-
-        sb.append("""
-                你是一名专业的国产数据库适配专家，专门帮助 Java 项目从 MySQL/Oracle/PostgreSQL 等数据库迁移到国产数据库。
-                
-                ## 核心职责
-                1. 分析 Java 项目的 pom.xml、配置文件、Mapper XML、Java 配置类
-                2. 识别需要修改的内容，给出精确的修改建议
-                3. 以规范的 JSON 格式输出修改方案，方便系统自动处理
-                4. 保持代码风格与原项目一致
-                
-                ## 通用适配规则
-                
-                ### Maven 依赖
-                根据目标数据库替换 JDBC 驱动 dependency。
-                
-                ### 连接配置
-                修改 spring.datasource.url、driver-class-name、方言(dialect)。
-                
-                ### MyBatis-Plus
-                修改 MybatisPlusProperties 中的 dbType，调整 PageHelper 插件配置。
-                
-                ### SQL 兼容性
-                扫描 Mapper XML，修正：DATE_FORMAT → TO_CHAR，IFNULL → NVL/COALESCE，
-                GROUP_CONCAT → WM_CONCAT/LISTAGG，LIMIT/OFFSET 语法，AUTO_INCREMENT 策略。
-                
-                """);
-
-        sb.append(buildContextPrompt(session));
-
-        return sb.toString();
-    }
+    // ==================== 数据库专项规则 ====================
 
     private String getDbDisplayName(String dbType) {
+        if (dbType == null) return "";
         return switch (dbType) {
             case "dameng" -> "达梦 DM8";
             case "kingbase" -> "人大金仓 KingbaseES";
@@ -100,7 +157,7 @@ public class SkillPromptBuilder {
         return switch (dbType) {
             case "dameng" -> """
                     ## 达梦 DM8 专项适配规则
-                    
+
                     **JDBC 依赖**
                     ```xml
                     <dependency>
@@ -113,7 +170,7 @@ public class SkillPromptBuilder {
                     **Driver Class**: `dm.jdbc.driver.DmDriver`
                     **Hibernate Dialect**: `org.hibernate.dialect.DmDialect`（需引入达梦方言包）
                     **MyBatis-Plus dbType**: `dm`
-                    
+
                     **SQL 转换规则**
                     - `IFNULL(a,b)` → `NVL(a,b)` 或 `COALESCE(a,b)`
                     - `DATE_FORMAT(d,'%Y-%m-%d')` → `TO_CHAR(d,'YYYY-MM-DD')`
@@ -127,7 +184,7 @@ public class SkillPromptBuilder {
                     """;
             case "kingbase" -> """
                     ## 人大金仓 KingbaseES 专项适配规则
-                    
+
                     **JDBC 依赖**
                     ```xml
                     <dependency>
@@ -140,7 +197,7 @@ public class SkillPromptBuilder {
                     **Driver Class**: `com.kingbase8.Driver`
                     **Hibernate Dialect**: `com.kingbase8.hibernate.dialect.KingbaseESDialect`
                     **MyBatis-Plus dbType**: `kingbase_es`
-                    
+
                     **SQL 转换规则（兼容 PostgreSQL）**
                     - `IFNULL(a,b)` → `COALESCE(a,b)`
                     - `DATE_FORMAT(d,'%Y-%m-%d')` → `TO_CHAR(d,'YYYY-MM-DD')`
@@ -152,7 +209,7 @@ public class SkillPromptBuilder {
                     """;
             case "gaussdb" -> """
                     ## 华为 GaussDB 专项适配规则
-                    
+
                     **JDBC 依赖**
                     ```xml
                     <dependency>
@@ -164,7 +221,7 @@ public class SkillPromptBuilder {
                     **连接 URL**: `jdbc:gaussdb://HOST:8000/DBNAME`
                     **Driver Class**: `com.huawei.gaussdb.jdbc.Driver`
                     **兼容模式**: 兼容 PostgreSQL，可使用 PostgreSQL Dialect
-                    
+
                     **SQL 转换规则**
                     - `IFNULL(a,b)` → `COALESCE(a,b)` 或 `NVL(a,b)`
                     - `DATE_FORMAT` → `TO_CHAR`
@@ -174,7 +231,7 @@ public class SkillPromptBuilder {
                     """;
             case "tidb" -> """
                     ## TiDB 专项适配规则
-                    
+
                     TiDB 高度兼容 MySQL，使用 MySQL JDBC 驱动即可。
                     **连接 URL**: `jdbc:mysql://HOST:4000/DBNAME`
                     **注意事项**
@@ -186,31 +243,5 @@ public class SkillPromptBuilder {
                     """;
             default -> "";
         };
-    }
-
-    private String getOutputFormatRules() {
-        return """
-                ## 输出格式规范
-                
-                在正常回答之后，**如果有代码修改建议**，必须在回复末尾附加如下 JSON 块：
-                
-                ```json
-                {
-                  "modifications": [
-                    {
-                      "filePath": "相对于项目根目录的路径，如 pom.xml 或 src/main/resources/application.yml",
-                      "description": "修改说明（一句话）",
-                      "original": "需要被替换的原始内容（必须是文件中实际存在的精确字符串）",
-                      "modified": "替换后的内容"
-                    }
-                  ]
-                }
-                ```
-                
-                - `original` 必须与文件内容完全匹配（用于字符串替换）
-                - 一个文件可以有多条 modification 条目
-                - 如果没有代码修改，不输出 JSON 块
-                - 使用中文回答，代码保持原语言
-                """;
     }
 }

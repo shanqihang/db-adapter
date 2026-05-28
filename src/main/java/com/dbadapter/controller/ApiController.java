@@ -130,6 +130,88 @@ public class ApiController {
         return ResponseEntity.ok(new Dto.OkResp("已重置 claude 进程"));
     }
 
+    /** 终止会话：关闭 claude 进程 + 回滚本轮所有已应用的修改 */
+    @PostMapping("/sessions/{id}/terminate")
+    @Transactional
+    public ResponseEntity<?> terminateSession(@PathVariable String id) {
+        return sessionRepo.findById(id).map(s -> {
+            if ("terminated".equals(s.getStatus()))
+                return ResponseEntity.badRequest().body(new Dto.ErrResp("该会话已终止"));
+
+            // 1. 关闭 claude 进程
+            sessionManager.closeSession(id);
+
+            // 2. 回滚所有已应用的 FileDiff
+            List<FileDiff> appliedDiffs = diffRepo.findBySessionIdAndAppliedTrueOrderByCreatedAtDesc(id);
+            int rolledBack = 0;
+            int failed = 0;
+            for (FileDiff diff : appliedDiffs) {
+                if (diff.getBackupPath() != null && !diff.getBackupPath().isEmpty()) {
+                    try {
+                        Path backupPath = Path.of(diff.getBackupPath());
+                        Path targetPath = Path.of(diff.getFilePath());
+                        if (Files.exists(backupPath)) {
+                            Files.copy(backupPath, targetPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            diff.setApplied(false);
+                            diff.setAppliedAt(null);
+                            diffRepo.save(diff);
+                            rolledBack++;
+                        } else {
+                            failed++;
+                            log.warn("终止会话回滚：备份文件不存在: {}", diff.getBackupPath());
+                        }
+                    } catch (Exception e) {
+                        failed++;
+                        log.error("终止会话回滚文件失败: {}", diff.getFilePath(), e);
+                    }
+                } else {
+                    // 无备份的自动应用修改（claude 直接编辑的），尝试用 originalContent 恢复
+                    if (diff.isAutoApplied() && diff.getOriginalContent() != null
+                            && !diff.getOriginalContent().isEmpty()) {
+                        try {
+                            Path targetPath = Path.of(diff.getFilePath());
+                            if (Files.exists(targetPath)) {
+                                String current = Files.readString(targetPath, java.nio.charset.StandardCharsets.UTF_8);
+                                // 对于 Edit 工具，originalContent 是 old_string，替换回去
+                                if (diff.getModifiedContent() != null && current.contains(diff.getModifiedContent())) {
+                                    String restored = current.replaceFirst(
+                                            java.util.regex.Pattern.quote(diff.getModifiedContent()),
+                                            diff.getOriginalContent());
+                                    Files.writeString(targetPath, restored, java.nio.charset.StandardCharsets.UTF_8);
+                                }
+                            }
+                            diff.setApplied(false);
+                            diff.setAppliedAt(null);
+                            diffRepo.save(diff);
+                            rolledBack++;
+                        } catch (Exception e) {
+                            failed++;
+                            log.error("终止会话回滚（无备份）文件失败: {}", diff.getFilePath(), e);
+                        }
+                    } else {
+                        failed++;
+                    }
+                }
+            }
+
+            // 3. 更新会话状态
+            s.setStatus("terminated");
+            sessionRepo.save(s);
+
+            // 4. 记录系统消息
+            String msg = String.format("⛔ 会话已终止。回滚了 %d 个文件修改%s",
+                    rolledBack, failed > 0 ? "，" + failed + " 个回滚失败" : "");
+            chatService.saveMessage(id, "system", msg);
+
+            return ResponseEntity.ok(Map.of(
+                    "ok", true,
+                    "rolledBack", rolledBack,
+                    "failed", failed,
+                    "message", msg
+            ));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
     // ==================== 消息 ====================
 
     @GetMapping("/sessions/{id}/messages")
@@ -143,6 +225,9 @@ public class ApiController {
     @PostMapping(value = "/sessions/{id}/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chat(@PathVariable String id, @RequestBody Dto.ChatReq req) {
         if (!sessionRepo.existsById(id)) return errorEmitter("会话不存在");
+        Session s = sessionRepo.findById(id).get();
+        if ("terminated".equals(s.getStatus())) return errorEmitter("该会话已终止，无法继续对话");
+        if ("completed".equals(s.getStatus())) return errorEmitter("该会话已完成，无法继续对话");
         if (req.getMessage() == null || req.getMessage().isBlank()) return errorEmitter("消息不能为空");
         return chatService.handleChat(id, req.getMessage());
     }
@@ -151,9 +236,149 @@ public class ApiController {
     @PostMapping(value = "/sessions/{id}/reset-chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter resetChat(@PathVariable String id, @RequestBody Dto.ChatReq req) {
         if (!sessionRepo.existsById(id)) return errorEmitter("会话不存在");
+        Session s = sessionRepo.findById(id).get();
+        if ("terminated".equals(s.getStatus())) return errorEmitter("该会话已终止，无法继续对话");
+        if ("completed".equals(s.getStatus())) return errorEmitter("该会话已完成，无法继续对话");
         String msg = req.getMessage() != null && !req.getMessage().isBlank()
                 ? req.getMessage() : "你好，请准备开始适配工作";
         return chatService.resetAndChat(id, msg);
+    }
+
+    // ==================== 两阶段工作流 ====================
+
+    /** 开始分析：切换到 analysis 阶段，启动 claude 进程并发送分析指令 */
+    @PostMapping(value = "/sessions/{id}/start-analysis", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter startAnalysis(@PathVariable String id) {
+        return sessionRepo.findById(id).map(s -> {
+            if ("terminated".equals(s.getStatus()) || "completed".equals(s.getStatus()))
+                return errorEmitter("该会话已" + s.getStatus() + "，无法开始分析");
+            if (s.getProjectPath() == null || s.getProjectPath().isBlank())
+                return errorEmitter("请先在配置中设置项目路径");
+
+            // 切换到分析阶段
+            s.setStatus("analysis");
+            sessionRepo.save(s);
+            // 关闭旧进程，下次 getOrCreate 会用分析阶段的 prompt 重建
+            sessionManager.closeSession(id);
+
+            String analysisMsg = "请全面分析这个 Java 项目的数据库适配需求。" +
+                    "扫描 pom.xml、配置文件、Mapper XML、Java 配置类等，" +
+                    "找出所有需要修改的地方，给出详细的适配方案。" +
+                    "注意：你现在处于分析模式，只能读取文件，不能修改任何文件。" +
+                    "请将修改建议以 JSON modifications 格式输出。";
+
+            return chatService.resetAndChat(id, analysisMsg);
+        }).orElse(errorEmitter("会话不存在"));
+    }
+
+    /** 确认方案：从 analysis/review 阶段进入 execution 阶段 */
+    @PostMapping("/sessions/{id}/confirm-plan")
+    public ResponseEntity<?> confirmPlan(@PathVariable String id) {
+        return sessionRepo.findById(id).map(s -> {
+            if (!"analysis".equals(s.getStatus()) && !"review".equals(s.getStatus()))
+                return ResponseEntity.badRequest().body(new Dto.ErrResp("当前阶段无法确认方案"));
+
+            // 检查是否有待执行的 diff
+            List<FileDiff> pendingDiffs = diffRepo.findBySessionIdOrderByCreatedAtAsc(id).stream()
+                    .filter(d -> !d.isApplied()).toList();
+            if (pendingDiffs.isEmpty())
+                return ResponseEntity.badRequest().body(new Dto.ErrResp("没有待确认的修改方案"));
+
+            // 切换到执行阶段
+            s.setStatus("execution");
+            sessionRepo.save(s);
+            // 关闭旧进程，下次会以执行阶段的 prompt 重建
+            sessionManager.closeSession(id);
+            chatService.saveMessage(id, "system",
+                    "✅ 方案已确认，进入执行阶段。共 " + pendingDiffs.size() + " 项修改待执行。");
+
+            return ResponseEntity.ok(Map.of(
+                    "ok", true,
+                    "phase", "execution",
+                    "pendingCount", pendingDiffs.size()
+            ));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    /** 批量应用所有待确认的 diff（执行阶段的核心操作） */
+    @PostMapping("/sessions/{id}/apply-all-diffs")
+    @Transactional
+    public ResponseEntity<?> applyAllDiffs(@PathVariable String id) {
+        return sessionRepo.findById(id).map(s -> {
+            if (!"execution".equals(s.getStatus()) && !"review".equals(s.getStatus()))
+                return ResponseEntity.badRequest().body(new Dto.ErrResp("当前阶段无法执行修改"));
+
+            List<FileDiff> pendingDiffs = diffRepo.findBySessionIdOrderByCreatedAtAsc(id).stream()
+                    .filter(d -> !d.isApplied()).toList();
+
+            int applied = 0;
+            int failed = 0;
+            List<String> errors = new ArrayList<>();
+
+            for (FileDiff diff : pendingDiffs) {
+                FileService.ApplyResult result = fileService.applyModification(
+                        diff.getFilePath(), diff.getOriginalContent(), diff.getModifiedContent());
+                if (result.success()) {
+                    diff.setApplied(true);
+                    diff.setAppliedAt(LocalDateTime.now());
+                    diff.setBackupPath(result.backupPath());
+                    diffRepo.save(diff);
+                    applied++;
+                } else {
+                    failed++;
+                    errors.add(diff.getFilePath() + ": " + result.error());
+                    log.warn("应用 diff 失败: {} - {}", diff.getFilePath(), result.error());
+                }
+            }
+
+            // 全部应用完成，切换到 completed 阶段
+            if (failed == 0) {
+                s.setStatus("completed");
+                sessionRepo.save(s);
+                chatService.saveMessage(id, "system",
+                        String.format("✅ 所有 %d 项修改已成功应用！", applied));
+            } else {
+                chatService.saveMessage(id, "system",
+                        String.format("⚠️ %d 项修改已应用，%d 项失败。失败项：\n%s",
+                                applied, failed, String.join("\n", errors)));
+            }
+
+            return ResponseEntity.ok(Map.of(
+                    "ok", true,
+                    "applied", applied,
+                    "failed", failed,
+                    "errors", errors,
+                    "phase", s.getStatus()
+            ));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    /** 进入方案评审阶段 */
+    @PostMapping("/sessions/{id}/enter-review")
+    public ResponseEntity<?> enterReview(@PathVariable String id) {
+        return sessionRepo.findById(id).map(s -> {
+            if (!"analysis".equals(s.getStatus()))
+                return ResponseEntity.badRequest().body(new Dto.ErrResp("只有分析阶段可以进入评审"));
+            s.setStatus("review");
+            sessionRepo.save(s);
+            chatService.saveMessage(id, "system", "📋 进入方案评审阶段，请查看修改记录确认或调整方案。");
+            return ResponseEntity.ok(Map.of("ok", true, "phase", "review"));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    /** 删除某个待确认的 diff（评审阶段拒绝某项修改） */
+    @DeleteMapping("/sessions/{id}/diffs/{diffId}/reject")
+    public ResponseEntity<?> rejectDiff(@PathVariable String id, @PathVariable String diffId) {
+        return sessionRepo.findById(id).map(s -> {
+            if (!"review".equals(s.getStatus()) && !"analysis".equals(s.getStatus()))
+                return ResponseEntity.badRequest().body(new Dto.ErrResp("当前阶段无法拒绝修改"));
+            return diffRepo.findById(diffId).map(diff -> {
+                if (diff.isApplied())
+                    return ResponseEntity.badRequest().body(new Dto.ErrResp("已应用的修改无法拒绝，请使用回滚"));
+                diffRepo.deleteById(diffId);
+                return ResponseEntity.ok(Map.of("ok", true, "message", "已拒绝该修改"));
+            }).orElse(ResponseEntity.notFound().build());
+        }).orElse(ResponseEntity.notFound().build());
     }
 
     // ==================== 文件扫描 ====================

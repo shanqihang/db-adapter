@@ -30,6 +30,17 @@ public class Session {
     @Column(length = 1024)
     private String projectPath;
 
+    /**
+     * 会话阶段/状态：
+     * analysis  - 分析阶段：AI 扫描项目并提出适配方案（不修改文件）
+     * review    - 方案评审：用户查看/调整方案
+     * execution - 执行阶段：应用确认的修改
+     * completed - 已完成
+     * terminated- 已终止（回滚所有修改）
+     */
+    @Column(length = 20, nullable = false, columnDefinition = "varchar(20) default 'analysis'")
+    private String status = "analysis";
+
     @Column(updatable = false)
     private LocalDateTime createdAt = LocalDateTime.now();
 

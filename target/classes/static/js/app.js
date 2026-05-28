@@ -1,6 +1,6 @@
 /**
  * 国产数据库适配助手 - 前端逻辑
- * claude 持久进程模式：每个会话对应一个 claude 进程，多轮对话保留上下文
+ * 两阶段工作流：分析阶段（只读+出方案）→ 执行阶段（确认后修改文件）
  */
 
 const state = {
@@ -16,6 +16,14 @@ const state = {
 
 const API = '/api';
 
+const PHASE_LABELS = {
+  analysis:  { label: '分析中', color: '#60a5fa', icon: '🔍' },
+  review:    { label: '待确认', color: '#fbbf24', icon: '📋' },
+  execution: { label: '执行中', color: '#4ade80', icon: '⚡' },
+  completed: { label: '已完成', color: '#a78bfa', icon: '✅' },
+  terminated:{ label: '已终止', color: '#f87171', icon: '⛔' }
+};
+
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', async () => {
   await checkStatus();
@@ -24,7 +32,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('newSessionName').addEventListener('keydown', e => {
     if (e.key === 'Enter') createSession();
   });
-  // 切换 Tab 时刷新状态
   document.getElementById('tabConfig').addEventListener('click', () => {
     setTimeout(refreshCliStatus, 100);
   });
@@ -57,7 +64,7 @@ function showBanner(msg, type) {
 // ==================== 进程状态轮询 ====================
 function startProcessStatusPolling() {
   stopProcessStatusPolling();
-  updateProcessStatus(); // 立即查一次
+  updateProcessStatus();
   state.statusTimer = setInterval(updateProcessStatus, 3000);
 }
 
@@ -99,17 +106,20 @@ function renderSessions() {
     list.innerHTML = '<div class="empty-hint">暂无会话，点击 + 新建</div>';
     return;
   }
-  list.innerHTML = state.sessions.map(s => `
+  list.innerHTML = state.sessions.map(s => {
+    const p = PHASE_LABELS[s.status] || { icon: '💬', label: s.status || '未知' };
+    const phaseText = s.status !== 'analysis' ? ` · ${p.label}` : '';
+    return `
     <div class="session-item ${state.currentSession?.id === s.id ? 'active' : ''}"
          onclick="selectSession('${s.id}')">
-      <div class="session-icon">💬</div>
+      <div class="session-icon">${p.icon}</div>
       <div class="session-info">
         <div class="session-name">${escHtml(s.name)}</div>
-        <div class="session-meta">${s.dbType || '未配置'} · ${formatDate(s.updatedAt)}</div>
+        <div class="session-meta">${s.dbType || '未配置'}${phaseText} · ${formatDate(s.updatedAt)}</div>
       </div>
       <button class="session-del" onclick="deleteSession(event,'${s.id}')" title="删除">✕</button>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 document.getElementById('btnNewSession').onclick = () => {
@@ -151,7 +161,10 @@ async function selectSession(id) {
   renderMessages();
   renderDiffs();
   renderSessions();
-  startProcessStatusPolling();
+  updatePhaseUI(session);
+  if (session.status !== 'terminated' && session.status !== 'completed') {
+    startProcessStatusPolling();
+  }
 }
 
 async function deleteSession(e, id) {
@@ -189,16 +202,254 @@ async function saveConfig() {
   state.currentSession = updated;
   state.sessions = state.sessions.map(s => s.id === updated.id ? updated : s);
   renderSessions();
-  // PUT 接口会关闭旧 claude 进程
   updateProcessStatus();
   const hint = document.getElementById('saveHint');
   hint.textContent = '✓ 已保存，claude 进程已重置';
   setTimeout(() => hint.textContent = '', 3000);
 }
 
+// ==================== 两阶段工作流控制 ====================
+
+/** 开始分析 */
+async function startAnalysis() {
+  if (!state.currentSession) { alert('请先选择会话'); return; }
+  if (!state.currentSession.projectPath) {
+    alert('请先在配置中设置项目路径');
+    switchTab('config');
+    return;
+  }
+  if (!state.currentSession.dbType) {
+    alert('请先在配置中选择目标数据库类型');
+    switchTab('config');
+    return;
+  }
+  if (state.isStreaming) { alert('当前有消息正在处理中，请等待完成'); return; }
+
+  appendMessage('system', '🚀 开始分析项目，AI 将扫描项目文件并生成适配方案...');
+  await streamRequest(`${API}/sessions/${state.currentSession.id}/start-analysis`, {});
+}
+
+/** 确认方案，进入执行阶段 */
+async function confirmPlan() {
+  if (!state.currentSession) return;
+
+  const pendingDiffs = state.diffs.filter(d => !d.applied);
+  if (pendingDiffs.length === 0) {
+    alert('没有待确认的修改方案');
+    return;
+  }
+
+  const confirmed = confirm(
+    `📋 方案确认\n\n` +
+    `共 ${pendingDiffs.length} 项修改待执行。\n\n` +
+    `确认后将进入执行阶段，您可以：\n` +
+    `- 逐条应用/拒绝修改\n` +
+    `- 一键执行所有修改\n\n` +
+    `确认进入执行阶段？`
+  );
+  if (!confirmed) return;
+
+  const r = await fetch(`${API}/sessions/${state.currentSession.id}/confirm-plan`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'}
+  }).then(r => r.json());
+
+  if (r.error) { alert(`操作失败: ${r.error}`); return; }
+
+  // 刷新会话状态
+  state.currentSession = await fetch(`${API}/sessions/${state.currentSession.id}`).then(r => r.json());
+  updatePhaseUI(state.currentSession);
+  appendMessage('system', `✅ 方案已确认，进入执行阶段。共 ${r.pendingCount} 项修改待执行。`);
+  renderSessions();
+}
+
+/** 批量应用所有修改 */
+async function applyAllDiffs() {
+  if (!state.currentSession) return;
+
+  const pendingDiffs = state.diffs.filter(d => !d.applied);
+  if (pendingDiffs.length === 0) {
+    alert('没有待执行的修改');
+    return;
+  }
+
+  const confirmed = confirm(
+    `⚡ 执行修改\n\n` +
+    `将应用全部 ${pendingDiffs.length} 项修改到项目文件。\n` +
+    `原文件将自动备份。\n\n` +
+    `确认执行？`
+  );
+  if (!confirmed) return;
+
+  const btn = document.getElementById('btnApplyAll');
+  btn.disabled = true;
+  btn.textContent = '⏳ 执行中...';
+
+  try {
+    const r = await fetch(`${API}/sessions/${state.currentSession.id}/apply-all-diffs`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'}
+    }).then(r => r.json());
+
+    if (r.ok) {
+      const msg = r.failed > 0
+        ? `⚠️ ${r.applied} 项修改已应用，${r.failed} 项失败`
+        : `✅ 全部 ${r.applied} 项修改已成功应用！`;
+      appendMessage('system', msg);
+      alert(msg);
+    } else {
+      alert(`执行失败: ${r.error}`);
+    }
+
+    // 刷新状态
+    state.currentSession = await fetch(`${API}/sessions/${state.currentSession.id}`).then(r => r.json());
+    state.diffs = await fetch(`${API}/sessions/${state.currentSession.id}/diffs`).then(r => r.json());
+    renderDiffs();
+    updatePhaseUI(state.currentSession);
+    renderSessions();
+  } catch (e) {
+    alert(`执行请求失败: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<span>⚡</span> 执行修改';
+  }
+}
+
+/** 进入评审阶段 */
+async function enterReview() {
+  if (!state.currentSession) return;
+  const r = await fetch(`${API}/sessions/${state.currentSession.id}/enter-review`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'}
+  }).then(r => r.json());
+  if (r.error) { alert(r.error); return; }
+  state.currentSession = await fetch(`${API}/sessions/${state.currentSession.id}`).then(r => r.json());
+  updatePhaseUI(state.currentSession);
+  renderSessions();
+}
+
+// ==================== 阶段 UI 控制 ====================
+
+function updatePhaseUI(session) {
+  const phase = session?.status || 'analysis';
+  const p = PHASE_LABELS[phase] || PHASE_LABELS.analysis;
+
+  // 阶段徽标
+  const badge = document.getElementById('phaseBadge');
+  badge.style.display = 'inline-block';
+  badge.textContent = `${p.icon} ${p.label}`;
+  badge.style.background = p.color + '20';
+  badge.style.color = p.color;
+  badge.style.border = `1px solid ${p.color}40`;
+
+  const isTerminated = phase === 'terminated';
+  const isCompleted = phase === 'completed';
+
+  // 按钮显隐
+  const btnStartAnalysis = document.getElementById('btnStartAnalysis');
+  const btnConfirmPlan = document.getElementById('btnConfirmPlan');
+  const btnApplyAll = document.getElementById('btnApplyAll');
+  const btnTerminate = document.getElementById('btnTerminate');
+  const btnReset = document.getElementById('btnReset');
+  const btnSend = document.getElementById('btnSend');
+  const btnScan = document.getElementById('btnScan');
+  const chatInputArea = document.getElementById('chatInputArea');
+
+  // 默认隐藏
+  btnConfirmPlan.style.display = 'none';
+  btnApplyAll.style.display = 'none';
+
+  if (isTerminated) {
+    btnStartAnalysis.style.display = 'none';
+    btnTerminate.disabled = true; btnTerminate.style.opacity = '0.4';
+    btnReset.disabled = true; btnReset.style.opacity = '0.4';
+    btnSend.disabled = true;
+    btnScan.disabled = true;
+    chatInputArea.style.display = 'none';
+    showTerminatedOverlay();
+    return;
+  }
+
+  if (isCompleted) {
+    btnStartAnalysis.style.display = 'none';
+    btnTerminate.disabled = true; btnTerminate.style.opacity = '0.4';
+    btnReset.disabled = true; btnReset.style.opacity = '0.4';
+    btnSend.disabled = true;
+    btnScan.disabled = true;
+    chatInputArea.style.display = 'none';
+    showCompletedOverlay();
+    return;
+  }
+
+  // 移除遮罩
+  removeOverlay();
+
+  // 恢复通用按钮
+  btnTerminate.disabled = false; btnTerminate.style.opacity = '1';
+  btnReset.disabled = false; btnReset.style.opacity = '1';
+  btnScan.disabled = false;
+  chatInputArea.style.display = 'block';
+
+  switch (phase) {
+    case 'analysis':
+      btnStartAnalysis.style.display = 'inline-flex';
+      btnConfirmPlan.style.display = 'none';
+      btnApplyAll.style.display = 'none';
+      btnSend.disabled = false;
+      break;
+
+    case 'review':
+      btnStartAnalysis.style.display = 'none';
+      btnConfirmPlan.style.display = 'inline-flex';
+      btnApplyAll.style.display = 'inline-flex';
+      btnSend.disabled = false;
+      break;
+
+    case 'execution':
+      btnStartAnalysis.style.display = 'none';
+      btnConfirmPlan.style.display = 'none';
+      btnApplyAll.style.display = 'inline-flex';
+      btnSend.disabled = false;
+      break;
+  }
+}
+
+function showTerminatedOverlay() {
+  removeOverlay();
+  const chatContainer = document.querySelector('.chat-container');
+  chatContainer.style.position = 'relative';
+  const overlay = document.createElement('div');
+  overlay.className = 'session-terminated-overlay';
+  overlay.id = 'phaseOverlay';
+  overlay.innerHTML = `
+    <div class="terminated-icon">⛔</div>
+    <div class="terminated-text">会话已终止</div>
+    <div class="terminated-sub">本轮所有文件修改已回滚，对话记录仍可查看</div>`;
+  chatContainer.appendChild(overlay);
+}
+
+function showCompletedOverlay() {
+  removeOverlay();
+  const chatContainer = document.querySelector('.chat-container');
+  chatContainer.style.position = 'relative';
+  const overlay = document.createElement('div');
+  overlay.className = 'session-terminated-overlay';
+  overlay.id = 'phaseOverlay';
+  overlay.innerHTML = `
+    <div class="terminated-icon">✅</div>
+    <div class="terminated-text" style="color:var(--accent)">适配完成</div>
+    <div class="terminated-sub">所有修改已成功应用，对话记录和修改记录仍可查看</div>`;
+  chatContainer.appendChild(overlay);
+}
+
+function removeOverlay() {
+  document.getElementById('phaseOverlay')?.remove();
+}
+
 // ==================== 重置 claude 会话 ====================
 async function resetSession() {
   if (!state.currentSession) { alert('请先选择会话'); return; }
+  if (['terminated','completed'].includes(state.currentSession.status)) { alert('该会话已结束，无法操作'); return; }
   if (state.isStreaming) { alert('当前有消息正在处理中，请等待完成'); return; }
   if (!confirm('重置 claude 进程将清空 AI 的上下文记忆（对话记录保留），确认？')) return;
 
@@ -208,6 +459,50 @@ async function resetSession() {
     '请准备开始适配工作。';
 
   await streamRequest(`${API}/sessions/${state.currentSession.id}/reset-chat`, { message: firstMsg });
+}
+
+// ==================== 终止会话（回滚所有修改） ====================
+async function terminateSession() {
+  if (!state.currentSession) { alert('请先选择会话'); return; }
+  if (['terminated','completed'].includes(state.currentSession.status)) { alert('该会话已结束'); return; }
+  if (state.isStreaming) { alert('当前有消息正在处理中，请等待完成后再终止'); return; }
+
+  const confirmed = confirm(
+    '⚠️ 终止会话将：\n\n' +
+    '1. 关闭 AI 进程，停止所有操作\n' +
+    '2. 回滚本轮会话中所有已应用的文件修改\n' +
+    '3. 会话变为"已终止"状态，无法继续对话\n\n' +
+    '确认终止？此操作不可撤销！'
+  );
+  if (!confirmed) return;
+
+  const btn = document.getElementById('btnTerminate');
+  btn.disabled = true;
+  btn.textContent = '⏳ 终止中...';
+
+  try {
+    const r = await fetch(`${API}/sessions/${state.currentSession.id}/terminate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    }).then(r => r.json());
+
+    if (r.error) { alert(`终止失败: ${r.error}`); btn.disabled = false; btn.textContent = '⛔ 终止会话'; return; }
+
+    state.currentSession.status = 'terminated';
+    updatePhaseUI(state.currentSession);
+
+    state.messages = await fetch(`${API}/sessions/${state.currentSession.id}/messages`).then(r => r.json());
+    state.diffs = await fetch(`${API}/sessions/${state.currentSession.id}/diffs`).then(r => r.json());
+    renderMessages();
+    renderDiffs();
+    renderSessions();
+
+    appendMessage('system', `⛔ 会话已终止。${r.message || '所有修改已回滚。'}`);
+  } catch (e) {
+    alert(`终止请求失败: ${e.message}`);
+    btn.disabled = false;
+    btn.textContent = '⛔ 终止会话';
+  }
 }
 
 // ==================== Tab 切换 ====================
@@ -233,13 +528,12 @@ function renderMessages() {
     container.innerHTML = `<div class="welcome-screen">
       <div class="welcome-icon">⬡</div>
       <h2>国产数据库适配助手</h2>
-      <p>配置好数据库类型和项目路径后，直接对话即可开始适配。<br>
-         claude 会在项目目录下运行，可直接读写项目文件。</p>
+      <p>配置好数据库类型和项目路径后，点击「开始分析」启动适配流程</p>
       <div class="welcome-tips">
-        <div class="tip">🤖 持久进程多轮对话</div>
-        <div class="tip">📂 直接操作项目文件</div>
-        <div class="tip">🌐 使用全局 Skill 规则</div>
-        <div class="tip">📝 修改记录可回溯</div>
+        <div class="tip">🔍 分析阶段：AI 扫描项目，输出适配方案</div>
+        <div class="tip">📋 评审阶段：查看方案，逐条确认或调整</div>
+        <div class="tip">⚡ 执行阶段：确认后应用修改到项目文件</div>
+        <div class="tip">⛔ 随时终止：回滚所有已应用的修改</div>
       </div>
     </div>`;
     return;
@@ -285,6 +579,9 @@ function autoResize(el) {
 
 async function sendMessage() {
   if (!state.currentSession) { alert('请先选择会话'); return; }
+  if (['terminated','completed'].includes(state.currentSession.status)) {
+    alert('该会话已结束，无法发送消息'); return;
+  }
   if (state.isStreaming) return;
   const input = document.getElementById('chatInput');
   const text = input.value.trim();
@@ -292,7 +589,6 @@ async function sendMessage() {
   input.value = '';
   input.style.height = 'auto';
 
-  // 首次发消息，若未配置项目路径则提示
   if (!state.currentSession.projectPath) {
     appendMessage('system',
       '⚠️ 未配置项目路径，claude 将在服务器当前目录运行。建议先在「配置」中设置项目路径。');
@@ -312,7 +608,6 @@ async function streamRequest(url, body) {
   bubble.classList.add('streaming-cursor');
   let fullText = '';
 
-  // 更新进程状态为 busy
   const dot = document.getElementById('procDot');
   const label = document.getElementById('procLabel');
   if (dot) { dot.className = 'proc-dot busy'; label.textContent = '处理中...'; }
@@ -362,10 +657,21 @@ async function streamRequest(url, body) {
                 'margin-top:10px;padding:8px 12px;background:rgba(74,222,128,0.1);' +
                 'border:1px solid rgba(74,222,128,0.3);border-radius:6px;font-size:12px;' +
                 'color:#4ade80;cursor:pointer;';
-              notice.textContent =
-                `📝 已生成 ${data.modifications.length} 处修改建议 → 点击查看「修改记录」`;
+              const phase = state.currentSession?.status;
+              if (phase === 'analysis') {
+                notice.textContent =
+                  `📋 生成了 ${data.modifications.length} 处修改建议 → 点击查看「修改记录」，确认后执行`;
+              } else {
+                notice.textContent =
+                  `📝 已生成 ${data.modifications.length} 处修改 → 点击查看「修改记录」`;
+              }
               notice.onclick = () => switchTab('diff');
               bubble.appendChild(notice);
+
+              // 分析阶段自动进入评审
+              if (phase === 'analysis' && data.modifications.length > 0) {
+                enterReview();
+              }
             }
             await refreshDiffs();
 
@@ -386,13 +692,12 @@ async function streamRequest(url, body) {
     state.isStreaming = false;
     setButtonsDisabled(false);
     scrollToBottom();
-    // 恢复进程状态轮询
     updateProcessStatus();
   }
 }
 
 function setButtonsDisabled(d) {
-  ['btnSend', 'btnScan', 'btnReset'].forEach(id => {
+  ['btnSend', 'btnScan', 'btnReset', 'btnStartAnalysis', 'btnConfirmPlan', 'btnApplyAll'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = d;
   });
@@ -420,10 +725,9 @@ async function scanProject() {
       const scanMsg = lines.join('\n\n');
       appendMessage('system', scanMsg);
 
-      // 同步将扫描摘要发给 claude，让 AI 知晓项目结构
       const claudePrompt = `项目扫描结果：\n${scanMsg}\n\n请记住这些文件，后续适配时直接读取它们。`;
       await streamRequest(`${API}/sessions/${state.currentSession.id}/chat`, { message: claudePrompt });
-      return; // streamRequest 内部已重置按钮
+      return;
     }
     state.messages = await fetch(`${API}/sessions/${state.currentSession.id}/messages`).then(r=>r.json());
     renderMessages();
@@ -447,10 +751,14 @@ function renderDiffs() {
       'AI 回复中包含修改建议时，会自动在此记录。</div>';
     return;
   }
+  const phase = state.currentSession?.status || 'analysis';
+  const canReject = phase === 'analysis' || phase === 'review';
+  const canApply = phase === 'review' || phase === 'execution';
+
   container.innerHTML = state.diffs.map(d => {
     const statusBadge = d.applied
       ? (d.autoApplied ? '🤖 AI 已修改' : '✓ 已应用')
-      : '待应用';
+      : (phase === 'analysis' ? '📋 待确认' : '待执行');
     const statusClass = d.applied ? 'applied' : 'pending';
 
     return `
@@ -475,19 +783,19 @@ function renderDiffs() {
             <pre style="white-space:pre-wrap;word-break:break-all">${escHtml(d.modifiedContent||'')}</pre>
           </div>
         </div>
-        ${!d.applied
-          ? `<div class="diff-actions">
-               <button class="btn-danger" onclick="deleteDiff('${d.id}')">忽略</button>
-               <button class="btn-primary" onclick="applyDiffById('${d.id}')">应用此修改</button>
-             </div>`
-          : `<div class="diff-actions" style="color:var(--accent);font-size:12px;font-family:var(--font-mono)">
-               ${d.autoApplied ? '🤖 AI 已直接修改文件' : '✓ 已应用'}
-               ${d.backupPath ? `<br>备份: ${escHtml(d.backupPath)}` : ''}
-               ${d.backupPath ? `<button class="btn-danger" style="margin-left:10px" onclick="rollbackDiff('${d.id}')">⏪ 回滚</button>` : ''}
-             </div>`}
+        <div class="diff-actions">
+          ${!d.applied && canReject ? `<button class="btn-danger" onclick="rejectDiff('${d.id}')">拒绝</button>` : ''}
+          ${!d.applied && canApply ? `<button class="btn-primary" onclick="applyDiffById('${d.id}')">应用此修改</button>` : ''}
+          ${d.applied ? `
+            <span style="color:var(--accent);font-size:12px;font-family:var(--font-mono)">
+              ${d.autoApplied ? '🤖 AI 已直接修改文件' : '✓ 已应用'}
+              ${d.backupPath ? `<br>备份: ${escHtml(d.backupPath)}` : ''}
+            </span>
+            ${d.backupPath ? `<button class="btn-danger" style="margin-left:10px" onclick="rollbackDiff('${d.id}')">⏪ 回滚</button>` : ''}
+          ` : ''}
+        </div>
       </div>
-    </div>
-  `;
+    </div>`;
   }).join('');
 }
 
@@ -500,6 +808,16 @@ async function applyDiffById(diffId) {
   }).then(r => r.json());
   if (r.error) alert(`应用失败: ${r.error}`);
   else { alert(`✅ 修改已应用！备份: ${r.backupPath}`); await refreshDiffs(); }
+}
+
+async function rejectDiff(diffId) {
+  if (!state.currentSession) return;
+  if (!confirm('确认拒绝此修改建议？')) return;
+  const r = await fetch(`${API}/sessions/${state.currentSession.id}/diffs/${diffId}/reject`, {
+    method: 'DELETE', headers: {'Content-Type': 'application/json'}
+  }).then(r => r.json());
+  if (r.error) alert(r.error);
+  else await refreshDiffs();
 }
 
 async function deleteDiff(diffId) {

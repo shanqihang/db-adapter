@@ -106,15 +106,24 @@ public class ClaudeSessionManager {
         Session appSession = sessionRepository.findById(sessionId)
                 .orElseThrow(() -> new IllegalArgumentException("会话不存在: " + sessionId));
 
-        // 只追加数据库类型/地址等上下文，全局 Skill 由 claude 自动加载
-        String appendPrompt = promptBuilder.buildContextPrompt(appSession);
+        // 根据当前阶段构建不同的 system prompt
+        String appendPrompt;
+        if ("execution".equals(appSession.getStatus())) {
+            // 执行阶段：使用执行模式提示词
+            // 获取已确认的 diff 摘要作为执行参考
+            appendPrompt = promptBuilder.buildExecutionPrompt(appSession, null);
+        } else {
+            // 分析阶段（默认）：使用分析模式提示词，禁止修改文件
+            appendPrompt = promptBuilder.buildAnalysisPrompt(appSession);
+        }
 
         ClaudeCliService.ClaudeSession claudeSession = claudeCliService.startSession(
                 appSession.getProjectPath(), appendPrompt);
 
         activeSessions.put(sessionId, claudeSession);
         lastActiveTime.put(sessionId, System.currentTimeMillis());
-        log.info("会话 {} 的 claude 进程已启动 (pid={})", sessionId, claudeSession.getPid());
+        log.info("会话 {} 的 claude 进程已启动 (pid={}, phase={})",
+                sessionId, claudeSession.getPid(), appSession.getStatus());
 
         return claudeSession;
     }

@@ -3,7 +3,12 @@
     "allow": [
       "Bash(mvn clean *)",
       "Bash(cmd.exe /c \"C:\\\\Users\\\\admin\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd\" --version)",
-      "Bash(C:\\\\Users\\\\admin\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd *)"
+      "Bash(C:\\\\Users\\\\admin\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd *)",
+      "Bash(./mvnw compile *)",
+      "Bash(mvn compile *)",
+      "Bash(where mvn *)",
+      "Bash(find /c /d -maxdepth 4 -name \"mvn.cmd\" -o -name \"mvn\")",
+      "Bash(cmd.exe *)"
     ]
   }
 }
