@@ -70,6 +70,16 @@ public class Dto {
         private String message;
     }
 
+    @Data
+    public static class StartupReq {
+        private String startupCommand;
+    }
+
+    @Data
+    public static class StartupLogReq {
+        private String logContent;
+    }
+
     // SSE 事件类型
     @Data
     public static class SseEvent {
@@ -98,6 +108,14 @@ public class Dto {
             SseEvent e = new SseEvent();
             e.type = "error";
             e.message = msg;
+            return e;
+        }
+
+        public static SseEvent system(String messageId, String message) {
+            SseEvent e = new SseEvent();
+            e.type = "system";
+            e.messageId = messageId;
+            e.message = message;
             return e;
         }
 
@@ -140,6 +158,14 @@ public class Dto {
         private String backupPath;
         private LocalDateTime createdAt;
 
+        // 新增字段用于更好的展示
+        private String relativePath;  // 相对项目路径的显示
+        private String statusBadge;   // 状态徽章文字
+        private String statusClass;   // CSS 类名
+        private long contentSize;     // 内容大小（字节数）
+        private boolean hasBackup;     // 是否有备份
+        private String fileExtension; // 文件扩展名
+
         public static FileDiffResp from(FileDiff d) {
             FileDiffResp r = new FileDiffResp();
             r.id = d.getId();
@@ -153,6 +179,30 @@ public class Dto {
             r.appliedAt = d.getAppliedAt();
             r.backupPath = d.getBackupPath();
             r.createdAt = d.getCreatedAt();
+
+            // 计算新增字段
+            r.contentSize = (d.getModifiedContent() != null ? d.getModifiedContent().length() : 0) +
+                           (d.getOriginalContent() != null ? d.getOriginalContent().length() : 0);
+
+            r.hasBackup = d.getBackupPath() != null && !d.getBackupPath().isEmpty();
+
+            // 生成状态徽章
+            if (r.applied) {
+                r.statusBadge = r.autoApplied ? "🤖 AI 已修改" : "✓ 已应用";
+                r.statusClass = "applied";
+            } else {
+                r.statusBadge = "📋 待执行";
+                r.statusClass = "pending";
+            }
+
+            // 获取文件扩展名
+            if (d.getFilePath() != null) {
+                int lastDot = d.getFilePath().lastIndexOf('.');
+                if (lastDot > 0) {
+                    r.fileExtension = d.getFilePath().substring(lastDot + 1).toLowerCase();
+                }
+            }
+
             return r;
         }
     }

@@ -35,6 +35,224 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('tabConfig').addEventListener('click', () => {
     setTimeout(refreshCliStatus, 100);
   });
+
+  // ==================== 启动验证功能 ====================
+
+  /** 打开启动验证对话框 */
+  function validateStartup() {
+    if (!state.currentSession) { alert('请先选择会话'); return; }
+    if (!state.currentSession.projectPath) {
+      alert('请先在配置中设置项目路径');
+      switchTab('config');
+      return;
+    }
+
+    // 设置默认命令
+    const projectPath = state.currentSession.projectPath;
+    let defaultCommand = '';
+
+    // 根据项目类型推断默认启动命令
+    if (projectPath.includes('pom.xml') || projectPath.includes('pom.xml')) {
+      defaultCommand = 'mvn spring-boot:run';
+    } else if (projectPath.includes('build.gradle')) {
+      defaultCommand = 'gradle bootRun';
+    } else if (projectPath.includes('package.json')) {
+      defaultCommand = 'npm start';
+    } else if (projectPath.includes('.jar')) {
+      // 查找jar文件
+      const jarFiles = findJarFiles(projectPath);
+      defaultCommand = jarFiles.length > 0 ? `java -jar ${jarFiles[0]}` : 'java -jar your-app.jar';
+    } else {
+      defaultCommand = '请输入启动命令';
+    }
+
+    document.getElementById('startupCommand').value = defaultCommand;
+    document.getElementById('startupLog').style.display = 'none';
+    document.getElementById('btnStartValidation').disabled = false;
+    document.getElementById('btnStartValidation').textContent = '开始启动';
+    openModal('modalStartup');
+  }
+
+  /** 查找项目中的jar文件 */
+  function findJarFiles(projectPath) {
+    // 简单实现，实际项目中可能需要更复杂的扫描
+    const targetDir = projectPath;
+    const jars = [];
+
+    // 常见的jar位置
+    const possiblePaths = [
+      `${targetDir}/target/*.jar`,
+      `${targetDir}/*.jar`,
+      `${targetDir}/build/libs/*.jar`,
+      `${targetDir}/dist/*.jar`
+    ];
+
+    // 这里只是模拟，实际使用时需要真实的文件系统访问
+    return jars;
+  }
+
+  /** 执行启动验证 */
+  async function doStartupValidation() {
+    if (!state.currentSession) return;
+
+    const command = document.getElementById('startupCommand').value.trim();
+    if (!command) {
+      alert('请输入启动命令');
+      return;
+    }
+
+    const btn = document.getElementById('btnStartValidation');
+    btn.disabled = true;
+    btn.textContent = '启动中...';
+
+    // 清空之前的日志
+    const logContent = document.querySelector('.log-content');
+    logContent.innerHTML = '';
+    document.getElementById('startupLog').style.display = 'block';
+
+    // 流式接收启动日志
+    try {
+      const response = await fetch(`${API}/sessions/${state.currentSession.id}/validate-startup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startupCommand: command })
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: '请求失败' }));
+        throw new Error(err.error || '启动验证失败');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            try {
+              const data = JSON.parse(line.slice(5).trim());
+              if (data.type === 'system') {
+                addStartupLogLine(data.message, 'info');
+              }
+            } catch (e) {
+              // 忽略解析错误
+            }
+          }
+        }
+      }
+
+    } catch (error) {
+      addStartupLogLine(`❌ 启动验证失败: ${error.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '开始启动';
+    }
+  }
+
+  /** 添加启动日志行 */
+  function addStartupLogLine(message, type = 'info') {
+    const logContent = document.querySelector('.log-content');
+    const line = document.createElement('div');
+    line.className = `log-line ${type}`;
+    line.textContent = `${new Date().toLocaleTimeString()} - ${message}`;
+    logContent.appendChild(line);
+    logContent.scrollTop = logContent.scrollHeight;
+  }
+
+  /** 复制启动日志 */
+  async function copyStartupLog() {
+    const logContent = document.querySelector('.log-content');
+    const logText = logContent.innerText;
+
+    if (!logText || logText.trim().length === 0) {
+      alert('没有可复制的日志');
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(logText);
+
+      // 显示复制成功提示
+      const btn = event.target;
+      const originalContent = btn.innerHTML;
+      btn.innerHTML = '✅ 已复制';
+      btn.style.background = 'var(--accent)';
+      btn.style.color = '#000';
+
+      setTimeout(() => {
+        btn.innerHTML = originalContent;
+        btn.style.background = '';
+        btn.style.color = '';
+      }, 2000);
+
+      // 询问用户是否要立即分析日志
+      if (confirm('日志已复制到剪贴板！\n\n是否要立即分析此启动日志？\n（可以自动粘贴日志内容进行分析）')) {
+        if (state.currentSession) {
+          openModal('modalStartupLogAnalysis');
+        }
+      }
+    } catch (err) {
+      // 降级方案
+      const textArea = document.createElement('textarea');
+      textArea.value = logText;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+
+      const btn = event.target;
+      const originalContent = btn.innerHTML;
+      btn.innerHTML = '✅ 已复制';
+      btn.style.background = 'var(--accent)';
+      btn.style.color = '#000';
+
+      setTimeout(() => {
+        btn.innerHTML = originalContent;
+        btn.style.background = '';
+        btn.style.color = '';
+      }, 2000);
+    }
+  }
+
+  /** 启动日志分析 */
+  function analyzeStartupLog() {
+    if (!state.currentSession) {
+      alert('请先选择会话');
+      return;
+    }
+
+    const logContent = document.getElementById('startupLogAnalysisContent');
+    if (!logContent.value.trim()) {
+      alert('请先复制启动日志内容');
+      return;
+    }
+
+    // 关闭分析对话框
+    closeModal('modalStartupLogAnalysis');
+
+    // 在聊天中发送分析请求
+    const analyzeMessage = `请分析以下启动日志，找出问题和解决方案：
+
+项目信息：
+- 数据库类型: ${state.currentSession.dbType || '未配置'}
+- 项目路径: ${state.currentSession.projectPath || '未配置'}
+
+启动日志内容：
+\`\`\`
+${logContent.value}
+\`\`\`
+
+请分析可能的问题并提供具体的修复建议。`;
+
+    appendMessage('system', '🔍 正在分析启动日志...');
+    streamRequest(`${API}/sessions/${state.currentSession.id}/chat`, { message: analyzeMessage });
+  }
 });
 
 // ==================== 系统状态 ====================
@@ -349,6 +567,7 @@ function updatePhaseUI(session) {
   const btnStartAnalysis = document.getElementById('btnStartAnalysis');
   const btnConfirmPlan = document.getElementById('btnConfirmPlan');
   const btnApplyAll = document.getElementById('btnApplyAll');
+  const btnValidateStartup = document.getElementById('btnValidateStartup');
   const btnTerminate = document.getElementById('btnTerminate');
   const btnReset = document.getElementById('btnReset');
   const btnSend = document.getElementById('btnSend');
@@ -358,6 +577,7 @@ function updatePhaseUI(session) {
   // 默认隐藏
   btnConfirmPlan.style.display = 'none';
   btnApplyAll.style.display = 'none';
+  btnValidateStartup.style.display = 'none';
 
   if (isTerminated) {
     btnStartAnalysis.style.display = 'none';
@@ -395,6 +615,7 @@ function updatePhaseUI(session) {
       btnStartAnalysis.style.display = 'inline-flex';
       btnConfirmPlan.style.display = 'none';
       btnApplyAll.style.display = 'none';
+      btnValidateStartup.style.display = 'inline-flex';
       btnSend.disabled = false;
       break;
 
@@ -402,6 +623,7 @@ function updatePhaseUI(session) {
       btnStartAnalysis.style.display = 'none';
       btnConfirmPlan.style.display = 'inline-flex';
       btnApplyAll.style.display = 'inline-flex';
+      btnValidateStartup.style.display = 'inline-flex';
       btnSend.disabled = false;
       break;
 
@@ -409,6 +631,7 @@ function updatePhaseUI(session) {
       btnStartAnalysis.style.display = 'none';
       btnConfirmPlan.style.display = 'none';
       btnApplyAll.style.display = 'inline-flex';
+      btnValidateStartup.style.display = 'inline-flex';
       btnSend.disabled = false;
       break;
   }
@@ -608,6 +831,19 @@ async function streamRequest(url, body) {
   bubble.classList.add('streaming-cursor');
   let fullText = '';
 
+  // 添加实时处理提示
+  const progressDiv = document.createElement('div');
+  progressDiv.className = 'processing-progress';
+  progressDiv.style.cssText = `
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    padding: 4px 0;
+  `;
+  progressDiv.innerHTML = '🔄 正在处理...';
+  bubble.appendChild(progressDiv);
+
   const dot = document.getElementById('procDot');
   const label = document.getElementById('procLabel');
   if (dot) { dot.className = 'proc-dot busy'; label.textContent = '处理中...'; }
@@ -622,6 +858,7 @@ async function streamRequest(url, body) {
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: '请求失败' }));
       bubble.classList.remove('streaming-cursor');
+      progressDiv.remove();
       bubble.innerHTML = `❌ ${escHtml(err.error || '请求失败')}`;
       return;
     }
@@ -646,11 +883,14 @@ async function streamRequest(url, body) {
             fullText += data.text;
             bubble.innerHTML = renderMarkdown(fullText);
             bubble.classList.add('streaming-cursor');
+            progressDiv.innerHTML = `🔄 已处理 ${fullText.length} 字符...`;
             scrollToBottom();
 
           } else if (data.type === 'done') {
             bubble.classList.remove('streaming-cursor');
+            progressDiv.remove();
             bubble.innerHTML = renderMarkdown(fullText);
+
             if (data.modifications?.length > 0) {
               const notice = document.createElement('div');
               notice.style.cssText =
@@ -670,23 +910,38 @@ async function streamRequest(url, body) {
 
               // 分析阶段自动进入评审
               if (phase === 'analysis' && data.modifications.length > 0) {
-                enterReview();
+                setTimeout(() => {
+                  enterReview();
+                  // 添加提示
+                  const enterNotice = document.createElement('div');
+                  enterNotice.style.cssText = 'margin-top:8px;font-size:12px;color:var(--yellow)';
+                  enterNotice.textContent = '✅ 已自动进入方案评审阶段';
+                  bubble.appendChild(enterNotice);
+                }, 500);
               }
             }
             await refreshDiffs();
 
           } else if (data.type === 'error') {
             bubble.classList.remove('streaming-cursor');
+            progressDiv.remove();
             bubble.innerHTML += `<br><br>❌ <span style="color:var(--red)">${escHtml(data.message)}</span>`;
 
           } else if (data.type === 'system') {
             appendMessage('system', data.text || '');
+            // 更新进度提示
+            if (data.text?.includes('正在扫描') || data.text?.includes('分析中')) {
+              progressDiv.innerHTML = `🔄 ${data.text}`;
+            }
           }
-        } catch (e) { /* 忽略 */ }
+        } catch (e) {
+          // 忽略解析错误，继续处理
+        }
       }
     }
   } catch (e) {
     bubble.classList.remove('streaming-cursor');
+    progressDiv.remove();
     bubble.innerHTML = `❌ 网络错误: ${escHtml(e.message)}`;
   } finally {
     state.isStreaming = false;
@@ -697,7 +952,7 @@ async function streamRequest(url, body) {
 }
 
 function setButtonsDisabled(d) {
-  ['btnSend', 'btnScan', 'btnReset', 'btnStartAnalysis', 'btnConfirmPlan', 'btnApplyAll'].forEach(id => {
+  ['btnSend', 'btnScan', 'btnReset', 'btnStartAnalysis', 'btnConfirmPlan', 'btnApplyAll', 'btnValidateStartup'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = d;
   });
@@ -756,17 +1011,30 @@ function renderDiffs() {
   const canApply = phase === 'review' || phase === 'execution';
 
   container.innerHTML = state.diffs.map(d => {
+    // 计算显示用的相对路径
+    let relativePath = d.filePath;
+    if (state.currentSession?.projectPath && d.filePath.startsWith(state.currentSession.projectPath)) {
+      relativePath = d.filePath.substring(state.currentSession.projectPath.length);
+    }
+
     const statusBadge = d.applied
       ? (d.autoApplied ? '🤖 AI 已修改' : '✓ 已应用')
       : (phase === 'analysis' ? '📋 待确认' : '待执行');
     const statusClass = d.applied ? 'applied' : 'pending';
 
+    // 文件图标
+    const fileIcon = getFileIcon(d.filePath);
+
     return `
     <div class="diff-card ${d.applied ? 'applied' : ''}" id="diff-${d.id}">
       <div class="diff-header" onclick="toggleDiff('${d.id}')">
         <div style="flex:1;overflow:hidden">
-          <div class="diff-file">${escHtml(d.filePath)}</div>
+          <div class="diff-file">
+            <span class="file-icon">${fileIcon}</span>
+            <span>${escHtml(relativePath)}</span>
+          </div>
           <div class="diff-desc" style="margin-top:3px">${escHtml(d.description||'')}</div>
+          ${d.fileExtension ? `<div class="file-meta">类型: ${d.fileExtension} | 大小: ${formatFileSize(d.contentSize)}</div>` : ''}
         </div>
         <div class="diff-status ${statusClass}">${statusBadge}</div>
         <div style="color:var(--text-muted);font-size:12px;margin-left:8px;font-family:var(--font-mono)">
@@ -917,6 +1185,83 @@ function renderMarkdown(text) {
   h = h.replace(/(<li>[\s\S]*?<\/li>)+/g, m => `<ul>${m}</ul>`);
   h = h.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>');
   return `<p>${h}</p>`;
+}
+
+// ==================== 文件相关工具函数 ====================
+
+/** 获取文件图标 */
+function getFileIcon(filePath) {
+  if (!filePath) return '📄';
+  const ext = filePath.split('.').pop()?.toLowerCase();
+
+  const iconMap = {
+    // Java 相关
+    'java': '☕',
+    'xml': '📋',
+    'properties': '⚙️',
+    'yml': '⚙️',
+    'yaml': '⚙️',
+    'json': '📊',
+    'xml': '📋',
+
+    // 数据库相关
+    'sql': '🗄️',
+    'ddl': '🗄️',
+    'mapper': '🗄️',
+
+    // Web 相关
+    'js': '📜',
+    'ts': '📜',
+    'html': '🌐',
+    'css': '🎨',
+    'vue': '💚',
+    'jsx': '⚛️',
+    'tsx': '⚛️',
+
+    // 配置文件
+    'conf': '⚙️',
+    'config': '⚙️',
+    'ini': '⚙️',
+    'toml': '📝',
+
+    // 文档
+    'md': '📖',
+    'txt': '📄',
+    'doc': '📄',
+    'docx': '📄',
+    'pdf': '📕',
+
+    // 构建相关
+    'pom': '📦',
+    'gradle': '📦',
+    'jar': '🧩',
+    'war': '🧩',
+
+    // 其他
+    'sh': '🐚',
+    'bat': '🐚',
+    'py': '🐍',
+    'go': '🔧',
+    'rs': '🦀'
+  };
+
+  return iconMap[ext] || '📄';
+}
+
+/** 格式化文件大小 */
+function formatFileSize(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = bytes;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size = size / 1024;
+    unitIndex++;
+  }
+
+  return `${size.toFixed(1)} ${units[unitIndex]}`;
 }
 document.querySelectorAll('.modal-overlay').forEach(o => {
   o.addEventListener('click', e => { if (e.target === o) o.style.display = 'none'; });

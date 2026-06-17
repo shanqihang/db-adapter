@@ -979,3 +979,252 @@ body {
   color: var(--accent) !important;
   background: rgba(74,222,128,0.1) !important;
 }
+
+.tool-btn-info {
+  color: var(--blue) !important;
+  font-weight: 500;
+}
+.tool-btn-info:hover {
+  border-color: var(--blue) !important;
+  color: var(--blue) !important;
+  background: rgba(96,165,250,0.1) !important;
+}
+
+/* ===== 启动验证相关样式 ===== */
+.startup-log {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 12px;
+  max-height: 300px;
+  display: none;
+}
+
+.log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.log-content {
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-y: auto;
+  max-height: calc(300px - 36px);
+}
+
+/* 日志行样式 */
+.log-line {
+  margin-bottom: 2px;
+  padding: 1px 0;
+}
+
+.log-line.info { color: var(--text-primary); }
+.log-line.success { color: var(--accent); }
+.log-line.error { color: var(--red); }
+.log-line.warn { color: var(--yellow); }
+
+/* 复制按钮样式 */
+.btn-icon-small {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+.btn-icon-small:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 改进的Diff卡片样式 */
+.diff-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  transition: all 0.2s;
+}
+
+.diff-card:hover {
+  border-color: var(--border-light);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+.diff-card.applied {
+  opacity: 0.7;
+  border-color: var(--accent);
+  background: rgba(74,222,128,0.05);
+}
+
+.diff-header {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: background 0.2s;
+}
+
+.diff-header:hover {
+  background: var(--bg-base);
+}
+
+.diff-file {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.diff-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.diff-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+.diff-status.applied {
+  background: rgba(74,222,128,0.15);
+  color: var(--accent);
+  border: 1px solid rgba(74,222,128,0.3);
+}
+
+.diff-status.pending {
+  background: rgba(251,191,36,0.15);
+  color: var(--yellow);
+  border: 1px solid rgba(251,191,36,0.3);
+}
+
+.diff-preview {
+  display: none;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-base);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+.diff-preview.open {
+  display: block;
+}
+
+.diff-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.diff-side-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diff-side.original .diff-side-label {
+  color: var(--red);
+}
+
+.diff-side.modified .diff-side-label {
+  color: var(--accent);
+}
+
+.diff-side pre {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.diff-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.diff-actions .btn-primary,
+.diff-actions .btn-danger {
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+/* ===== 处理进度提示 ===== */
+.processing-progress {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  padding: 4px 0;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+/* 流式光标动画 */
+.streaming-cursor::after {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background: var(--accent);
+  animation: blink 1s step-end infinite;
+  vertical-align: text-bottom;
+  margin-left: 2px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* 消息动画 */
+.msg {
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

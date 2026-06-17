@@ -80,6 +80,9 @@
             <span class="proc-dot" id="procDot"></span>
             <span class="proc-label" id="procLabel">未启动</span>
           </div>
+          <button class="tool-btn tool-btn-info" id="btnValidateStartup" onclick="validateStartup()" style="display:none" title="一键启动并验证项目">
+            <span>🚀</span> 启动验证
+          </button>
           <button class="tool-btn tool-btn-warn" id="btnReset" onclick="resetSession()" title="关闭当前 claude 进程并重新启动">
             <span>🔄</span> 重置会话
           </button>
@@ -210,6 +213,68 @@
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeModal('modalDiff')">关闭</button>
         <button class="btn-primary" id="btnApplyDiff" onclick="applyDiff()">应用此修改</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 启动验证 Modal -->
+  <div class="modal-overlay" id="modalStartup" style="display:none">
+    <div class="modal">
+      <div class="modal-title">🚀 一键启动验证</div>
+      <div class="form-group">
+        <label>启动命令</label>
+        <textarea
+          id="startupCommand"
+          placeholder="例如：mvn spring-boot:run&#10;或者：java -jar target/myapp.jar&#10;或者：npm start"
+          rows="3"
+          style="resize: vertical;"
+        ></textarea>
+        <span class="form-hint">
+          输入启动项目的命令，支持：<br>
+          • Maven 项目：mvn spring-boot:run<br>
+          • Java 应用：java -jar your-app.jar<br>
+          • Node.js 项目：npm start / node server.js<br>
+          • Spring Boot：gradle bootRun
+        </span>
+      </div>
+      <div id="startupLog" class="startup-log" style="display:none">
+        <div class="log-header">
+          <span>启动日志</span>
+          <button class="btn-icon-small" onclick="copyStartupLog()" title="复制日志">📋</button>
+        </div>
+        <div class="log-content"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeModal('modalStartup')">取消</button>
+        <button class="btn-primary" id="btnStartValidation" onclick="doStartupValidation()">开始启动</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 启动日志分析 Modal -->
+  <div class="modal-overlay" id="modalStartupLogAnalysis" style="display:none">
+    <div class="modal">
+      <div class="modal-title">🔍 启动日志分析</div>
+      <div class="form-group">
+        <label>启动日志内容</label>
+        <textarea
+          id="startupLogAnalysisContent"
+          placeholder="粘贴刚才复制的启动日志内容..."
+          rows="8"
+          style="resize: vertical;"
+        ></textarea>
+        <span class="form-hint">
+          将刚才复制的启动日志粘贴到此处，AI将分析问题并提供修复建议。<br>
+          支持分析：<br>
+          • 数据库连接错误<br>
+          • 依赖冲突问题<br>
+          • 配置文件错误<br>
+          • 代码适配问题
+        </span>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeModal('modalStartupLogAnalysis')">取消</button>
+        <button class="btn-primary" onclick="analyzeStartupLog()">开始分析</button>
       </div>
     </div>
   </div>

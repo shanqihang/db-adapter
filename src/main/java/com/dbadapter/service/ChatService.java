@@ -14,15 +14,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.regex.*;
 
 /**
@@ -46,6 +45,13 @@ public class ChatService {
     private final ExecutorService executorService = Executors.newCachedThreadPool(r -> {
         Thread thread = new Thread(r);
         thread.setDaemon(true);
+        return thread;
+    });
+
+    private final ExecutorService startupExecutor = Executors.newCachedThreadPool(r -> {
+        Thread thread = new Thread(r);
+        thread.setDaemon(true);
+        thread.setName("startup-validator");
         return thread;
     });
 
@@ -482,5 +488,200 @@ public class ChatService {
         } catch (IOException e) {
             emitter.completeWithError(e);
         }
+    }
+
+    // ==================== 项目启动验证 ====================
+
+    /**
+     * 一键启动并验证适配项目
+     * @param sessionId 会话ID
+     * @param startupCommand 启动命令
+     * @return SSE emitter 用于流式返回启动日志
+     */
+    public SseEmitter validateStartup(String sessionId, String startupCommand) {
+        SseEmitter emitter = new SseEmitter(600_000L); // 10分钟超时
+
+        if (!sessionRepo.existsById(sessionId)) {
+            sendError(emitter, "会话不存在");
+            return emitter;
+        }
+
+        startupExecutor.submit(() -> {
+            try {
+                Session session = sessionRepo.findById(sessionId).orElse(null);
+                if (session == null || session.getProjectPath() == null || session.getProjectPath().isBlank()) {
+                    sendError(emitter, "请先配置项目路径");
+                    return;
+                }
+
+                // 保存启动验证开始消息
+                saveMessage(sessionId, "system", "🚀 开始启动验证项目...\n启动命令: " + startupCommand);
+
+                // 执行启动命令
+                Process process = executeStartupCommand(sessionId, startupCommand, emitter);
+
+                // 等待进程结束
+                int exitCode = process.waitFor();
+
+                // 发送完成事件
+                if (exitCode == 0) {
+                    sendSystemMessage(emitter, "✅ 项目启动成功！退出码: " + exitCode);
+                    sendSystemMessage(emitter, "💡 如果需要分析启动日志或修复问题，可以将错误日志复制给AI进行分析");
+                } else {
+                    sendSystemMessage(emitter, "❌ 项目启动失败！退出码: " + exitCode);
+                    sendSystemMessage(emitter, "💡 请将错误日志复制给AI，AI可以帮助分析问题并提供修复建议");
+                }
+
+                emitter.complete();
+
+            } catch (Exception e) {
+                log.error("启动验证异常 session={}", sessionId, e);
+                sendError(emitter, "启动验证失败: " + e.getMessage());
+            }
+        });
+
+        return emitter;
+    }
+
+    /**
+     * 执行启动命令
+     */
+    private Process executeStartupCommand(String sessionId, String command, SseEmitter emitter) throws IOException, InterruptedException {
+        Session session = sessionRepo.findById(sessionId).orElse(null);
+        String projectPath = session != null ? session.getProjectPath() : null;
+
+        // 解析命令
+        String[] cmd;
+        if (System.getProperty("os.name").toLowerCase().contains("win")) {
+            cmd = new String[]{"cmd.exe", "/c", command};
+        } else {
+            cmd = new String[]{"sh", "-c", command};
+        }
+
+        // 创建进程
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        if (projectPath != null && !projectPath.isBlank()) {
+            pb.directory(new File(projectPath));
+        }
+        pb.redirectErrorStream(true); // 合并错误流到输出流
+
+        Process process = pb.start();
+
+        // 创建线程读取输出流
+        new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    // 实时发送日志
+                    sendSystemMessage(emitter, "📄 " + line);
+                }
+            } catch (IOException e) {
+                log.debug("读取启动进程输出流异常", e);
+            }
+        }).start();
+
+        return process;
+    }
+
+    /**
+     * 发送系统消息到SSE
+     */
+    private void sendSystemMessage(SseEmitter emitter, String message) {
+        try {
+            ChatMessage msg = saveMessage("", "system", message);
+            emitter.send(SseEmitter.event()
+                    .data(objectMapper.writeValueAsString(Dto.SseEvent.system(msg.getId(), message))));
+        } catch (IOException e) {
+            log.debug("发送SSE消息失败", e);
+        }
+    }
+
+    // ==================== 启动日志分析 ====================
+
+    /**
+     * 分析启动日志
+     * @param sessionId 会话ID
+     * @param logContent 启动日志内容
+     * @return SSE emitter 用于流式返回分析结果
+     */
+    public SseEmitter analyzeStartupLog(String sessionId, String logContent) {
+        SseEmitter emitter = new SseEmitter(300_000L); // 5分钟超时
+
+        if (!sessionRepo.existsById(sessionId)) {
+            sendError(emitter, "会话不存在");
+            return emitter;
+        }
+
+        executorService.submit(() -> {
+            try {
+                Session session = sessionRepo.findById(sessionId).orElse(null);
+                if (session == null || session.getProjectPath() == null || session.getProjectPath().isBlank()) {
+                    sendError(emitter, "请先配置项目路径");
+                    return;
+                }
+
+                // 保存启动日志分析开始消息
+                saveMessage(sessionId, "system", "🔍 开始分析启动日志...");
+
+                // 构建日志分析提示
+                String analysisPrompt = "请帮我分析以下启动日志，找出问题和解决方案。项目信息：\n" +
+                        "- 数据库类型: " + (session.getDbType() != null ? session.getDbType() : "未配置") + "\n" +
+                        "- 项目路径: " + session.getProjectPath() + "\n\n" +
+                        "请分析以下日志内容：\n" +
+                        "```\n" + logContent + "\n```\n\n" +
+                        "请从以下角度分析：\n" +
+                        "1. 数据库连接相关错误\n" +
+                        "2. 依赖冲突或缺失\n" +
+                        "3. 配置文件问题\n" +
+                        "4. 代码适配问题\n" +
+                        "5. 给出具体的修复建议\n\n" +
+                        "请详细分析并给出可执行的修复方案。";
+
+                // 重置claude会话并发送分析指令
+                SseEmitter chatEmitter = resetAndChat(sessionId, analysisPrompt);
+
+                // 转发聊天事件到启动日志分析的事件流
+                // 这里简化处理，直接使用聊天功能，实际中可能需要更复杂的转发逻辑
+
+                // 发送分析消息到现有的claude会话
+                ClaudeCliService.ClaudeSession claudeSession = sessionManager.getOrCreate(sessionId);
+                claudeSession.sendMessage(
+                        analysisPrompt,
+                        chunk -> {
+                            try {
+                                emitter.send(SseEmitter.event()
+                                        .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
+                            } catch (IOException e) {
+                                log.debug("发送启动日志分析chunk失败", e);
+                            }
+                        },
+                        toolUse -> {
+                            // 处理工具调用
+                            log.info("启动日志分析中的工具调用: {}", toolUse.name);
+                        },
+                        done -> {
+                            try {
+                                // 发送完成事件
+                                ChatMessage aiMsg = saveMessage(sessionId, "assistant", done);
+                                emitter.send(SseEmitter.event()
+                                        .data(objectMapper.writeValueAsString(Dto.SseEvent.done(aiMsg.getId(), null))));
+                                emitter.complete();
+                            } catch (IOException e) {
+                                log.debug("发送启动日志分析完成事件失败", e);
+                            }
+                        },
+                        err -> {
+                            sendError(emitter, "启动日志分析失败: " + err);
+                        }
+                );
+
+            } catch (Exception e) {
+                log.error("启动日志分析异常 session={}", sessionId, e);
+                sendError(emitter, "启动日志分析失败: " + e.getMessage());
+            }
+        });
+
+        return emitter;
     }
 }

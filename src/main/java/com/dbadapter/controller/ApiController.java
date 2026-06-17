@@ -465,6 +465,38 @@ public class ApiController {
         }).orElse(ResponseEntity.notFound().build());
     }
 
+    // ==================== 项目启动验证 ====================
+
+    /** 一键启动验证项目 */
+    @PostMapping(value = "/sessions/{id}/validate-startup", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter validateStartup(@PathVariable String id, @RequestBody Dto.StartupReq req) {
+        if (!sessionRepo.existsById(id)) return errorEmitter("会话不存在");
+
+        Session s = sessionRepo.findById(id).orElse(null);
+        if (s == null) return errorEmitter("会话不存在");
+        if ("terminated".equals(s.getStatus())) return errorEmitter("该会话已终止");
+        if ("completed".equals(s.getStatus())) return errorEmitter("该会话已完成");
+        if (req.getStartupCommand() == null || req.getStartupCommand().isBlank())
+            return errorEmitter("启动命令不能为空");
+
+        return chatService.validateStartup(id, req.getStartupCommand());
+    }
+
+    /** 分析启动日志 */
+    @PostMapping(value = "/sessions/{id}/analyze-startup-log", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter analyzeStartupLog(@PathVariable String id, @RequestBody Dto.StartupLogReq req) {
+        if (!sessionRepo.existsById(id)) return errorEmitter("会话不存在");
+
+        Session s = sessionRepo.findById(id).orElse(null);
+        if (s == null) return errorEmitter("会话不存在");
+        if ("terminated".equals(s.getStatus())) return errorEmitter("该会话已终止");
+        if ("completed".equals(s.getStatus())) return errorEmitter("该会话已完成");
+        if (req.getLogContent() == null || req.getLogContent().isBlank())
+            return errorEmitter("日志内容不能为空");
+
+        return chatService.analyzeStartupLog(id, req.getLogContent());
+    }
+
     // ==================== 文件读取 ====================
 
     @PostMapping("/read-file")
