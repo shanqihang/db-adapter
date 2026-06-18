@@ -1,12 +1,15 @@
 package com.dbadapter.service;
 
+import com.dbadapter.entity.ChatMessage;
 import com.dbadapter.entity.Session;
+import com.dbadapter.repository.ChatMessageRepository;
 import com.dbadapter.repository.SessionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -29,6 +32,7 @@ public class ClaudeSessionManager {
 
     private final ClaudeCliService claudeCliService;
     private final SessionRepository sessionRepository;
+    private final ChatMessageRepository chatMessageRepository;
     private final SkillPromptBuilder promptBuilder;
 
     /** sessionId → claude 进程会话 */
@@ -109,12 +113,35 @@ public class ClaudeSessionManager {
         // 根据当前阶段构建不同的 system prompt
         String appendPrompt;
         if ("execution".equals(appSession.getStatus())) {
-            // 执行阶段：使用执行模式提示词
-            // 获取已确认的 diff 摘要作为执行参考
             appendPrompt = promptBuilder.buildExecutionPrompt(appSession, null);
         } else {
-            // 分析阶段（默认）：使用分析模式提示词，禁止修改文件
             appendPrompt = promptBuilder.buildAnalysisPrompt(appSession);
+        }
+
+        // 恢复对话历史作为上下文（防止进程重建后丢失上下文）
+        List<ChatMessage> history = chatMessageRepository.findBySessionIdOrderByCreatedAtAsc(sessionId);
+        if (history != null && !history.isEmpty()) {
+            StringBuilder contextBuilder = new StringBuilder();
+            contextBuilder.append("\n\n--- 以下是该会话之前的对话历史，请继续基于此上下文回复 ---\n");
+            int start = Math.max(0, history.size() - 20);
+            for (int i = start; i < history.size(); i++) {
+                ChatMessage msg = history.get(i);
+                if ("system".equals(msg.getRole())) {
+                    if (msg.getContent() != null && !msg.getContent().startsWith("🔄")) {
+                        contextBuilder.append("[系统] ").append(msg.getContent()).append("\n");
+                    }
+                } else if ("user".equals(msg.getRole())) {
+                    contextBuilder.append("[用户] ").append(msg.getContent()).append("\n");
+                } else if ("assistant".equals(msg.getRole())) {
+                    String content = msg.getContent();
+                    if (content != null && content.length() > 500) {
+                        content = content.substring(0, 500) + "...(内容已截断)";
+                    }
+                    contextBuilder.append("[AI] ").append(content).append("\n");
+                }
+            }
+            contextBuilder.append("--- 以上为历史对话记录，新消息请继续此上下文 ---\n");
+            appendPrompt = appendPrompt + contextBuilder;
         }
 
         ClaudeCliService.ClaudeSession claudeSession = claudeCliService.startSession(

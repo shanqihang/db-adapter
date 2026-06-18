@@ -22,6 +22,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Consumer;
 import java.util.regex.*;
 
 /**
@@ -41,6 +42,8 @@ public class ChatService {
     private final FileDiffRepository diffRepo;
     private final ClaudeSessionManager sessionManager;
     private final ObjectMapper objectMapper;
+
+    private static final long SSE_TIMEOUT_MS = 600_000L;
 
     private final ExecutorService executorService = Executors.newCachedThreadPool(r -> {
         Thread thread = new Thread(r);
@@ -65,7 +68,7 @@ public class ChatService {
      * 用户发消息，转发给对应的 claude 持久进程，SSE 流式推送回复
      */
     public SseEmitter handleChat(String sessionId, String userMessage) {
-        SseEmitter emitter = new SseEmitter(300_000L);
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
 
         if (!sessionRepo.existsById(sessionId)) {
             sendError(emitter, "会话不存在");
@@ -88,46 +91,61 @@ public class ChatService {
                 StringBuilder fullText = new StringBuilder();
                 List<ClaudeCliService.ToolUseEvent> toolUseEvents = new ArrayList<>();
 
-                claudeSession.sendMessage(
-                        userMessage,
-                        chunk -> {
-                            fullText.append(chunk);
-                            try {
-                                emitter.send(SseEmitter.event()
-                                        .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
-                            } catch (Exception ignored) {}
-                        },
-                        toolUse -> {
-                            toolUseEvents.add(toolUse);
-                            log.info("捕获工具调用: {} (id={})", toolUse.name, toolUse.toolUseId);
-                        },
-                        done -> {
-                            try {
-                                ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
+                Consumer<String> onChunk = chunk -> {
+                    fullText.append(chunk);
+                    try {
+                        emitter.send(SseEmitter.event()
+                                .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
+                    } catch (Exception ignored) {}
+                };
 
-                                List<Dto.ModificationItem> mods;
-                                if (isAnalysis) {
-                                    mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
-                                } else {
-                                    mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
-                                    if (mods.isEmpty()) {
-                                        mods = parseAndSaveDiffs(sessionId, fullText.toString());
-                                    }
-                                }
+                Consumer<ClaudeCliService.ToolUseEvent> onToolUse = toolUse -> {
+                    toolUseEvents.add(toolUse);
+                    log.info("捕获工具调用: {} (id={})", toolUse.name, toolUse.toolUseId);
+                };
 
-                                emitter.send(SseEmitter.event()
-                                        .data(objectMapper.writeValueAsString(
-                                                Dto.SseEvent.done(aiMsg.getId(), mods))));
-                                emitter.complete();
-                            } catch (Exception e) {
-                                emitter.completeWithError(e);
+                Consumer<String> onDone = doneText -> {
+                    try {
+                        ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
+
+                        List<Dto.ModificationItem> mods;
+                        if (isAnalysis) {
+                            mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
+                        } else {
+                            mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
+                            if (mods.isEmpty()) {
+                                mods = parseAndSaveDiffs(sessionId, fullText.toString());
                             }
-                        },
-                        err -> {
-                            saveMessage(sessionId, "system", "❌ " + err);
-                            sendError(emitter, err);
                         }
-                );
+
+                        emitter.send(SseEmitter.event()
+                                .data(objectMapper.writeValueAsString(
+                                        Dto.SseEvent.done(aiMsg.getId(), mods))));
+                        emitter.complete();
+                    } catch (Exception e) {
+                        emitter.completeWithError(e);
+                    }
+                };
+
+                Consumer<String> onError = err -> {
+                    saveMessage(sessionId, "system", "❌ " + err);
+                    sendError(emitter, err);
+                };
+
+                emitter.onTimeout(() -> {
+                    log.warn("SSE 连接超时, session={}", sessionId);
+                    claudeSession.abort();
+                    sessionManager.closeSession(sessionId);
+                    saveMessage(sessionId, "system", "⏱️ AI 响应超时，会话已重置，请重新发送消息");
+                    try { emitter.complete(); } catch (Exception ignored) {}
+                });
+
+                emitter.onError(ex -> {
+                    log.warn("SSE 连接错误, session={}: {}", sessionId, ex.getMessage());
+                    claudeSession.abort();
+                });
+
+                claudeSession.sendMessage(userMessage, onChunk, onToolUse, onDone, onError);
 
             } catch (Exception e) {
                 log.error("handleChat 异常 session={}", sessionId, e);
@@ -139,10 +157,10 @@ public class ChatService {
     }
 
     /**
-     * 重置 claude 会话
+     * 重置 claude 会话并发送消息（保留用于 start-analysis 等场景）
      */
     public SseEmitter resetAndChat(String sessionId, String userMessage) {
-        SseEmitter emitter = new SseEmitter(300_000L);
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
 
         if (!sessionRepo.existsById(sessionId)) {
             sendError(emitter, "会话不存在");
@@ -161,43 +179,58 @@ public class ChatService {
                 StringBuilder fullText = new StringBuilder();
                 List<ClaudeCliService.ToolUseEvent> toolUseEvents = new ArrayList<>();
 
-                claudeSession.sendMessage(
-                        userMessage,
-                        chunk -> {
-                            fullText.append(chunk);
-                            try {
-                                emitter.send(SseEmitter.event()
-                                        .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
-                            } catch (Exception ignored) {}
-                        },
-                        toolUse -> {
-                            toolUseEvents.add(toolUse);
-                            log.info("捕获工具调用: {} (id={})", toolUse.name, toolUse.toolUseId);
-                        },
-                        done -> {
-                            try {
-                                ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
+                Consumer<String> onChunk = chunk -> {
+                    fullText.append(chunk);
+                    try {
+                        emitter.send(SseEmitter.event()
+                                .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
+                    } catch (Exception ignored) {}
+                };
 
-                                List<Dto.ModificationItem> mods;
-                                if (isAnalysis) {
-                                    mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
-                                } else {
-                                    mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
-                                    if (mods.isEmpty()) {
-                                        mods = parseAndSaveDiffs(sessionId, fullText.toString());
-                                    }
-                                }
+                Consumer<ClaudeCliService.ToolUseEvent> onToolUse = toolUse -> {
+                    toolUseEvents.add(toolUse);
+                    log.info("捕获工具调用: {} (id={})", toolUse.name, toolUse.toolUseId);
+                };
 
-                                emitter.send(SseEmitter.event()
-                                        .data(objectMapper.writeValueAsString(
-                                                Dto.SseEvent.done(aiMsg.getId(), mods))));
-                                emitter.complete();
-                            } catch (Exception e) {
-                                emitter.completeWithError(e);
+                Consumer<String> onDone = doneText -> {
+                    try {
+                        ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
+
+                        List<Dto.ModificationItem> mods;
+                        if (isAnalysis) {
+                            mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
+                        } else {
+                            mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
+                            if (mods.isEmpty()) {
+                                mods = parseAndSaveDiffs(sessionId, fullText.toString());
                             }
-                        },
-                        err -> sendError(emitter, err)
-                );
+                        }
+
+                        emitter.send(SseEmitter.event()
+                                .data(objectMapper.writeValueAsString(
+                                        Dto.SseEvent.done(aiMsg.getId(), mods))));
+                        emitter.complete();
+                    } catch (Exception e) {
+                        emitter.completeWithError(e);
+                    }
+                };
+
+                Consumer<String> onError = err -> sendError(emitter, err);
+
+                emitter.onTimeout(() -> {
+                    log.warn("SSE 连接超时 (resetAndChat), session={}", sessionId);
+                    claudeSession.abort();
+                    sessionManager.closeSession(sessionId);
+                    saveMessage(sessionId, "system", "⏱️ AI 响应超时，会话已重置，请重新发送消息");
+                    try { emitter.complete(); } catch (Exception ignored) {}
+                });
+
+                emitter.onError(ex -> {
+                    log.warn("SSE 连接错误 (resetAndChat), session={}: {}", sessionId, ex.getMessage());
+                    claudeSession.abort();
+                });
+
+                claudeSession.sendMessage(userMessage, onChunk, onToolUse, onDone, onError);
             } catch (Exception e) {
                 sendError(emitter, "重置失败: " + e.getMessage());
             }
@@ -499,7 +532,7 @@ public class ChatService {
      * @return SSE emitter 用于流式返回启动日志
      */
     public SseEmitter validateStartup(String sessionId, String startupCommand) {
-        SseEmitter emitter = new SseEmitter(600_000L); // 10分钟超时
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
 
         if (!sessionRepo.existsById(sessionId)) {
             sendError(emitter, "会话不存在");
@@ -525,11 +558,11 @@ public class ChatService {
 
                 // 发送完成事件
                 if (exitCode == 0) {
-                    sendSystemMessage(emitter, "✅ 项目启动成功！退出码: " + exitCode);
-                    sendSystemMessage(emitter, "💡 如果需要分析启动日志或修复问题，可以将错误日志复制给AI进行分析");
+                    sendSystemMessage(emitter, "✅ 项目启动成功！退出码: " + exitCode, sessionId);
+                    sendSystemMessage(emitter, "💡 如果需要分析启动日志或修复问题，可以将错误日志复制给AI进行分析", sessionId);
                 } else {
-                    sendSystemMessage(emitter, "❌ 项目启动失败！退出码: " + exitCode);
-                    sendSystemMessage(emitter, "💡 请将错误日志复制给AI，AI可以帮助分析问题并提供修复建议");
+                    sendSystemMessage(emitter, "❌ 项目启动失败！退出码: " + exitCode, sessionId);
+                    sendSystemMessage(emitter, "💡 请将错误日志复制给AI，AI可以帮助分析问题并提供修复建议", sessionId);
                 }
 
                 emitter.complete();
@@ -574,7 +607,7 @@ public class ChatService {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     // 实时发送日志
-                    sendSystemMessage(emitter, "📄 " + line);
+                    sendSystemMessage(emitter, "📄 " + line, sessionId);
                 }
             } catch (IOException e) {
                 log.debug("读取启动进程输出流异常", e);
@@ -587,9 +620,9 @@ public class ChatService {
     /**
      * 发送系统消息到SSE
      */
-    private void sendSystemMessage(SseEmitter emitter, String message) {
+    private void sendSystemMessage(SseEmitter emitter, String message, String sessionId) {
         try {
-            ChatMessage msg = saveMessage("", "system", message);
+            ChatMessage msg = saveMessage(sessionId, "system", message);
             emitter.send(SseEmitter.event()
                     .data(objectMapper.writeValueAsString(Dto.SseEvent.system(msg.getId(), message))));
         } catch (IOException e) {
@@ -606,12 +639,14 @@ public class ChatService {
      * @return SSE emitter 用于流式返回分析结果
      */
     public SseEmitter analyzeStartupLog(String sessionId, String logContent) {
-        SseEmitter emitter = new SseEmitter(300_000L); // 5分钟超时
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
 
         if (!sessionRepo.existsById(sessionId)) {
             sendError(emitter, "会话不存在");
             return emitter;
         }
+
+        saveMessage(sessionId, "system", "🔍 开始分析启动日志...");
 
         executorService.submit(() -> {
             try {
@@ -621,10 +656,6 @@ public class ChatService {
                     return;
                 }
 
-                // 保存启动日志分析开始消息
-                saveMessage(sessionId, "system", "🔍 开始分析启动日志...");
-
-                // 构建日志分析提示
                 String analysisPrompt = "请帮我分析以下启动日志，找出问题和解决方案。项目信息：\n" +
                         "- 数据库类型: " + (session.getDbType() != null ? session.getDbType() : "未配置") + "\n" +
                         "- 项目路径: " + session.getProjectPath() + "\n\n" +
@@ -638,43 +669,69 @@ public class ChatService {
                         "5. 给出具体的修复建议\n\n" +
                         "请详细分析并给出可执行的修复方案。";
 
-                // 重置claude会话并发送分析指令
-                SseEmitter chatEmitter = resetAndChat(sessionId, analysisPrompt);
-
-                // 转发聊天事件到启动日志分析的事件流
-                // 这里简化处理，直接使用聊天功能，实际中可能需要更复杂的转发逻辑
-
-                // 发送分析消息到现有的claude会话
                 ClaudeCliService.ClaudeSession claudeSession = sessionManager.getOrCreate(sessionId);
-                claudeSession.sendMessage(
-                        analysisPrompt,
-                        chunk -> {
-                            try {
-                                emitter.send(SseEmitter.event()
-                                        .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
-                            } catch (IOException e) {
-                                log.debug("发送启动日志分析chunk失败", e);
+
+                if (sessionManager.isProcessing(sessionId)) {
+                    sendError(emitter, "当前有消息正在处理中，请等待完成后再发送");
+                    return;
+                }
+
+                boolean isAnalysis = session != null && "analysis".equals(session.getStatus());
+                StringBuilder fullText = new StringBuilder();
+                List<ClaudeCliService.ToolUseEvent> toolUseEvents = new ArrayList<>();
+
+                Consumer<String> onChunk = chunk -> {
+                    fullText.append(chunk);
+                    try {
+                        emitter.send(SseEmitter.event()
+                                .data(objectMapper.writeValueAsString(Dto.SseEvent.chunk(chunk))));
+                    } catch (Exception ignored) {}
+                };
+
+                Consumer<ClaudeCliService.ToolUseEvent> onToolUse = toolUse -> {
+                    toolUseEvents.add(toolUse);
+                    log.info("启动日志分析 - 捕获工具调用: {} (id={})", toolUse.name, toolUse.toolUseId);
+                };
+
+                Consumer<String> onDone = doneText -> {
+                    try {
+                        ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
+                        List<Dto.ModificationItem> mods;
+                        if (isAnalysis) {
+                            mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
+                        } else {
+                            mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
+                            if (mods.isEmpty()) {
+                                mods = parseAndSaveDiffs(sessionId, fullText.toString());
                             }
-                        },
-                        toolUse -> {
-                            // 处理工具调用
-                            log.info("启动日志分析中的工具调用: {}", toolUse.name);
-                        },
-                        done -> {
-                            try {
-                                // 发送完成事件
-                                ChatMessage aiMsg = saveMessage(sessionId, "assistant", done);
-                                emitter.send(SseEmitter.event()
-                                        .data(objectMapper.writeValueAsString(Dto.SseEvent.done(aiMsg.getId(), null))));
-                                emitter.complete();
-                            } catch (IOException e) {
-                                log.debug("发送启动日志分析完成事件失败", e);
-                            }
-                        },
-                        err -> {
-                            sendError(emitter, "启动日志分析失败: " + err);
                         }
-                );
+                        emitter.send(SseEmitter.event()
+                                .data(objectMapper.writeValueAsString(
+                                        Dto.SseEvent.done(aiMsg.getId(), mods))));
+                        emitter.complete();
+                    } catch (Exception e) {
+                        emitter.completeWithError(e);
+                    }
+                };
+
+                Consumer<String> onError = err -> {
+                    saveMessage(sessionId, "system", "❌ 启动日志分析失败: " + err);
+                    sendError(emitter, "启动日志分析失败: " + err);
+                };
+
+                emitter.onTimeout(() -> {
+                    log.warn("启动日志分析 SSE 超时, session={}", sessionId);
+                    claudeSession.abort();
+                    sessionManager.closeSession(sessionId);
+                    try { emitter.complete(); } catch (Exception ignored) {}
+                });
+
+                emitter.onError(ex -> {
+                    log.warn("启动日志分析 SSE 错误, session={}: {}", sessionId, ex.getMessage());
+                    claudeSession.abort();
+                });
+
+                claudeSession.sendMessage(analysisPrompt, onChunk, onToolUse, onDone, onError);
 
             } catch (Exception e) {
                 log.error("启动日志分析异常 session={}", sessionId, e);

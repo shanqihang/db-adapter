@@ -353,6 +353,8 @@ public class ClaudeCliService {
             }
         }
 
+        private volatile Thread readingThread;
+
         /**
          * 发送消息并流式消费回复（stream-json 协议）。
          *
@@ -396,6 +398,7 @@ public class ClaudeCliService {
 
                 // 读取 stdout 流式 JSON 事件
                 StringBuilder fullText = new StringBuilder();
+                readingThread = Thread.currentThread();
                 String line;
 
                 while ((line = stdout.readLine()) != null) {
@@ -473,10 +476,26 @@ public class ClaudeCliService {
                 }
 
             } catch (Exception e) {
-                log.error("sendMessage 异常", e);
-                onError.accept("发送消息失败: " + e.getMessage());
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    onError.accept("等待 claude 响应超时，请重新发送消息");
+                } else {
+                    log.error("sendMessage 异常", e);
+                    onError.accept("发送消息失败: " + e.getMessage());
+                }
             } finally {
                 processing = false;
+                readingThread = null;
+            }
+        }
+
+        /**
+         * 中断当前正在进行的读取操作（用于超时或客户端断开时）
+         */
+        public void abort() {
+            Thread t = readingThread;
+            if (t != null) {
+                t.interrupt();
             }
         }
 

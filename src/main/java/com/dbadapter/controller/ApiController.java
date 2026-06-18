@@ -130,6 +130,22 @@ public class ApiController {
         return ResponseEntity.ok(new Dto.OkResp("已重置 claude 进程"));
     }
 
+    /** 重置会话：清空上下文和消息记录，等待下次对话 */
+    @PostMapping("/sessions/{id}/reset")
+    @Transactional
+    public ResponseEntity<?> resetSession(@PathVariable String id) {
+        if (!sessionRepo.existsById(id)) return ResponseEntity.notFound().build();
+        Session s = sessionRepo.findById(id).get();
+        if ("terminated".equals(s.getStatus()) || "completed".equals(s.getStatus()))
+            return ResponseEntity.badRequest().body(new Dto.ErrResp("该会话已结束，无法重置"));
+
+        sessionManager.closeSession(id);
+        messageRepo.deleteBySessionId(id);
+        diffRepo.deleteBySessionId(id);
+        log.info("会话 {} 已重置，清空了消息和修改记录", id);
+        return ResponseEntity.ok(Map.of("ok", true, "message", "会话已重置，上下文已清空"));
+    }
+
     /** 终止会话：关闭 claude 进程 + 回滚本轮所有已应用的修改 */
     @PostMapping("/sessions/{id}/terminate")
     @Transactional
@@ -232,7 +248,7 @@ public class ApiController {
         return chatService.handleChat(id, req.getMessage());
     }
 
-    /** 重置对话：关闭旧进程，新开 claude 进程，再发第一条消息 */
+    /** 重置对话：关闭旧进程，新开 claude 进程，再发第一条消息（仅用于 start-analysis 等需要自动发送消息的场景） */
     @PostMapping(value = "/sessions/{id}/reset-chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter resetChat(@PathVariable String id, @RequestBody Dto.ChatReq req) {
         if (!sessionRepo.existsById(id)) return errorEmitter("会话不存在");

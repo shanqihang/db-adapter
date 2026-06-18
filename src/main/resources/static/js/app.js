@@ -674,14 +674,25 @@ async function resetSession() {
   if (!state.currentSession) { alert('请先选择会话'); return; }
   if (['terminated','completed'].includes(state.currentSession.status)) { alert('该会话已结束，无法操作'); return; }
   if (state.isStreaming) { alert('当前有消息正在处理中，请等待完成'); return; }
-  if (!confirm('重置 claude 进程将清空 AI 的上下文记忆（对话记录保留），确认？')) return;
+  if (!confirm('重置会话将清空所有对话记录和修改记录，确认？')) return;
 
-  const firstMsg = '你好，我们重新开始。' +
-    (state.currentSession.dbType ? `目标数据库是${state.currentSession.dbType}，` : '') +
-    (state.currentSession.projectPath ? `项目路径是 ${state.currentSession.projectPath}。` : '') +
-    '请准备开始适配工作。';
+  try {
+    const r = await fetch(`${API}/sessions/${state.currentSession.id}/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    }).then(r => r.json());
 
-  await streamRequest(`${API}/sessions/${state.currentSession.id}/reset-chat`, { message: firstMsg });
+    if (r.error) { alert(`重置失败: ${r.error}`); return; }
+
+    // 清空本地状态
+    state.messages = [];
+    state.diffs = [];
+    renderMessages();
+    renderDiffs();
+    appendMessage('system', '🔄 会话已重置，上下文已清空。请重新开始对话。');
+  } catch (e) {
+    alert(`重置失败: ${e.message}`);
+  }
 }
 
 // ==================== 终止会话（回滚所有修改） ====================
