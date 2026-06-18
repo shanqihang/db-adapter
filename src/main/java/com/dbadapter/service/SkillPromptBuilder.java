@@ -13,6 +13,36 @@ import org.springframework.stereotype.Component;
 @Component
 public class SkillPromptBuilder {
 
+    // ==================== 空闲模式提示词 ====================
+
+    /**
+     * 空闲/普通对话模式：自由对话，不限制工具使用
+     */
+    public String buildIdlePrompt(Session session) {
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("""
+                # 当前模式：对话模式（CHAT MODE）
+
+                ## 你的角色
+
+                你是一个数据库适配助手，正在帮助用户将 Java 项目从 MySQL 适配到国产数据库。
+                你可以自由地和用户对话，回答问题，提供建议。
+
+                ## 规则
+
+                - 你可以读取项目文件来了解上下文
+                - 你可以回答用户关于数据库适配的问题
+                - 不要主动修改项目文件，只有在用户明确要求时才操作
+                - 使用中文回答，代码保持原语言
+
+                """);
+
+        sb.append(buildContextPrompt(session));
+
+        return sb.toString();
+    }
+
     // ==================== 分析阶段提示词 ====================
 
     /**
@@ -68,7 +98,7 @@ public class SkillPromptBuilder {
         sb.append(buildContextPrompt(session));
         sb.append("\n");
         sb.append("## 适配规则\n\n");
-        sb.append("请使用你掌握的数据库适配技能（init-db-adapt Skill），针对目标数据库类型进行适配。\n");
+        sb.append("请使用 init-db-adapt Skill 中掌握的数据库适配知识，针对目标数据库类型进行适配。\n");
 
         return sb.toString();
     }
@@ -86,7 +116,7 @@ public class SkillPromptBuilder {
 
                 ## 你的任务
 
-                用户已确认了以下适配方案，请按照方案**逐项执行修改**：
+                用户已确认了适配方案，请按照方案**逐项执行修改**：
                 - 使用 Edit 或 Write 工具修改项目文件
                 - 严格按照方案中的 original 和 modified 内容进行替换
                 - 每完成一处修改，简要确认
@@ -96,6 +126,7 @@ public class SkillPromptBuilder {
                 - 修改前确保 original 内容与文件实际内容匹配
                 - 保持代码风格与原项目一致
                 - 使用中文说明，代码保持原语言
+                - 每次只修改一处，确认成功后再修改下一处
 
                 """);
 

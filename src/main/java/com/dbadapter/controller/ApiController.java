@@ -142,6 +142,8 @@ public class ApiController {
         sessionManager.closeSession(id);
         messageRepo.deleteBySessionId(id);
         diffRepo.deleteBySessionId(id);
+        s.setStatus("idle");
+        sessionRepo.save(s);
         log.info("会话 {} 已重置，清空了消息和修改记录", id);
         return ResponseEntity.ok(Map.of("ok", true, "message", "会话已重置，上下文已清空"));
     }

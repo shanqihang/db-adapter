@@ -1,8 +1,10 @@
 package com.dbadapter.service;
 
 import com.dbadapter.entity.ChatMessage;
+import com.dbadapter.entity.FileDiff;
 import com.dbadapter.entity.Session;
 import com.dbadapter.repository.ChatMessageRepository;
+import com.dbadapter.repository.FileDiffRepository;
 import com.dbadapter.repository.SessionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -33,6 +35,7 @@ public class ClaudeSessionManager {
     private final ClaudeCliService claudeCliService;
     private final SessionRepository sessionRepository;
     private final ChatMessageRepository chatMessageRepository;
+    private final FileDiffRepository fileDiffRepository;
     private final SkillPromptBuilder promptBuilder;
 
     /** sessionId → claude 进程会话 */
@@ -106,6 +109,33 @@ public class ClaudeSessionManager {
 
     // ==================== 私有方法 ====================
 
+    /**
+     * 构建已确认方案的摘要文本，供执行阶段 Claude 参考
+     */
+    private String buildApprovedPlanSummary(String sessionId) {
+        List<FileDiff> pendingDiffs = fileDiffRepository.findBySessionIdOrderByCreatedAtAsc(sessionId)
+                .stream().filter(d -> !d.isApplied()).toList();
+        if (pendingDiffs.isEmpty()) return null;
+
+        StringBuilder sb = new StringBuilder();
+        for (FileDiff diff : pendingDiffs) {
+            sb.append("### ").append(diff.getFilePath()).append("\n");
+            sb.append("**说明**: ").append(diff.getDescription() != null ? diff.getDescription() : "无").append("\n");
+            if (diff.getOriginalContent() != null && !diff.getOriginalContent().isBlank()) {
+                String original = diff.getOriginalContent();
+                if (original.length() > 300) original = original.substring(0, 300) + "\n...(已截断)";
+                sb.append("**原始内容**:\n```\n").append(original).append("\n```\n");
+            }
+            if (diff.getModifiedContent() != null && !diff.getModifiedContent().isBlank()) {
+                String modified = diff.getModifiedContent();
+                if (modified.length() > 300) modified = modified.substring(0, 300) + "\n...(已截断)";
+                sb.append("**修改后内容**:\n```\n").append(modified).append("\n```\n");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
     private ClaudeCliService.ClaudeSession createNew(String sessionId) throws Exception {
         Session appSession = sessionRepository.findById(sessionId)
                 .orElseThrow(() -> new IllegalArgumentException("会话不存在: " + sessionId));
@@ -113,9 +143,12 @@ public class ClaudeSessionManager {
         // 根据当前阶段构建不同的 system prompt
         String appendPrompt;
         if ("execution".equals(appSession.getStatus())) {
-            appendPrompt = promptBuilder.buildExecutionPrompt(appSession, null);
-        } else {
+            String planSummary = buildApprovedPlanSummary(sessionId);
+            appendPrompt = promptBuilder.buildExecutionPrompt(appSession, planSummary);
+        } else if ("analysis".equals(appSession.getStatus())) {
             appendPrompt = promptBuilder.buildAnalysisPrompt(appSession);
+        } else {
+            appendPrompt = promptBuilder.buildIdlePrompt(appSession);
         }
 
         // 恢复对话历史作为上下文（防止进程重建后丢失上下文）

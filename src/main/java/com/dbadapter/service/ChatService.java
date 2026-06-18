@@ -85,7 +85,6 @@ public class ChatService {
                 }
 
                 Session session = sessionRepo.findById(sessionId).orElse(null);
-                boolean isAnalysis = session != null && "analysis".equals(session.getStatus());
 
                 ClaudeCliService.ClaudeSession claudeSession = sessionManager.getOrCreate(sessionId);
                 StringBuilder fullText = new StringBuilder();
@@ -109,13 +108,15 @@ public class ChatService {
                         ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
 
                         List<Dto.ModificationItem> mods;
-                        if (isAnalysis) {
+                        if ("analysis".equals(session != null ? session.getStatus() : null)) {
                             mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
-                        } else {
+                        } else if ("execution".equals(session != null ? session.getStatus() : null)) {
                             mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
                             if (mods.isEmpty()) {
                                 mods = parseAndSaveDiffs(sessionId, fullText.toString());
                             }
+                        } else {
+                            mods = Collections.emptyList();
                         }
 
                         emitter.send(SseEmitter.event()
@@ -173,7 +174,6 @@ public class ChatService {
         executorService.submit(() -> {
             try {
                 Session session = sessionRepo.findById(sessionId).orElse(null);
-                boolean isAnalysis = session != null && "analysis".equals(session.getStatus());
 
                 ClaudeCliService.ClaudeSession claudeSession = sessionManager.restart(sessionId);
                 StringBuilder fullText = new StringBuilder();
@@ -197,13 +197,15 @@ public class ChatService {
                         ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
 
                         List<Dto.ModificationItem> mods;
-                        if (isAnalysis) {
+                        if ("analysis".equals(session != null ? session.getStatus() : null)) {
                             mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
-                        } else {
+                        } else if ("execution".equals(session != null ? session.getStatus() : null)) {
                             mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
                             if (mods.isEmpty()) {
                                 mods = parseAndSaveDiffs(sessionId, fullText.toString());
                             }
+                        } else {
+                            mods = Collections.emptyList();
                         }
 
                         emitter.send(SseEmitter.event()
@@ -676,7 +678,6 @@ public class ChatService {
                     return;
                 }
 
-                boolean isAnalysis = session != null && "analysis".equals(session.getStatus());
                 StringBuilder fullText = new StringBuilder();
                 List<ClaudeCliService.ToolUseEvent> toolUseEvents = new ArrayList<>();
 
@@ -692,18 +693,20 @@ public class ChatService {
                     toolUseEvents.add(toolUse);
                     log.info("启动日志分析 - 捕获工具调用: {} (id={})", toolUse.name, toolUse.toolUseId);
                 };
-
-                Consumer<String> onDone = doneText -> {
+Consumer<String> onDone = doneText -> {
                     try {
                         ChatMessage aiMsg = saveMessage(sessionId, "assistant", fullText.toString());
+
                         List<Dto.ModificationItem> mods;
-                        if (isAnalysis) {
+                        if ("analysis".equals(session != null ? session.getStatus() : null)) {
                             mods = captureProposedModifications(sessionId, toolUseEvents, fullText.toString());
-                        } else {
+                        } else if ("execution".equals(session != null ? session.getStatus() : null)) {
                             mods = captureFileModificationsFromTools(sessionId, toolUseEvents);
                             if (mods.isEmpty()) {
                                 mods = parseAndSaveDiffs(sessionId, fullText.toString());
                             }
+                        } else {
+                            mods = Collections.emptyList();
                         }
                         emitter.send(SseEmitter.event()
                                 .data(objectMapper.writeValueAsString(

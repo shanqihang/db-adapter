@@ -17,6 +17,7 @@ const state = {
 const API = '/api';
 
 const PHASE_LABELS = {
+  idle:       { label: '对话中', color: '#94a3b8', icon: '💬' },
   analysis:  { label: '分析中', color: '#60a5fa', icon: '🔍' },
   review:    { label: '待确认', color: '#fbbf24', icon: '📋' },
   execution: { label: '执行中', color: '#4ade80', icon: '⚡' },
@@ -326,7 +327,7 @@ function renderSessions() {
   }
   list.innerHTML = state.sessions.map(s => {
     const p = PHASE_LABELS[s.status] || { icon: '💬', label: s.status || '未知' };
-    const phaseText = s.status !== 'analysis' ? ` · ${p.label}` : '';
+    const phaseText = (s.status && s.status !== 'idle') ? ` · ${p.label}` : '';
     return `
     <div class="session-item ${state.currentSession?.id === s.id ? 'active' : ''}"
          onclick="selectSession('${s.id}')">
@@ -611,6 +612,14 @@ function updatePhaseUI(session) {
   chatInputArea.style.display = 'block';
 
   switch (phase) {
+    case 'idle':
+      btnStartAnalysis.style.display = 'inline-flex';
+      btnConfirmPlan.style.display = 'none';
+      btnApplyAll.style.display = 'none';
+      btnValidateStartup.style.display = 'none';
+      btnSend.disabled = false;
+      break;
+
     case 'analysis':
       btnStartAnalysis.style.display = 'inline-flex';
       btnConfirmPlan.style.display = 'none';
@@ -690,6 +699,11 @@ async function resetSession() {
     renderMessages();
     renderDiffs();
     appendMessage('system', '🔄 会话已重置，上下文已清空。请重新开始对话。');
+
+    // 刷新会话状态（status 已改为 idle）
+    state.currentSession = await fetch(`${API}/sessions/${state.currentSession.id}`).then(r => r.json());
+    updatePhaseUI(state.currentSession);
+    renderSessions();
   } catch (e) {
     alert(`重置失败: ${e.message}`);
   }
@@ -959,6 +973,14 @@ async function streamRequest(url, body) {
     setButtonsDisabled(false);
     scrollToBottom();
     updateProcessStatus();
+    // 刷新会话状态（分析/执行阶段切换后 UI 需要更新）
+    if (state.currentSession) {
+      fetch(`${API}/sessions/${state.currentSession.id}`).then(r => r.json()).then(s => {
+        state.currentSession = s;
+        updatePhaseUI(s);
+        renderSessions();
+      }).catch(() => {});
+    }
   }
 }
 
