@@ -36,225 +36,161 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('tabConfig').addEventListener('click', () => {
     setTimeout(refreshCliStatus, 100);
   });
+});
 
-  // ==================== 启动验证功能 ====================
+// ==================== 启动验证功能 ====================
 
-  /** 打开启动验证对话框 */
-  function validateStartup() {
-    if (!state.currentSession) { alert('请先选择会话'); return; }
-    if (!state.currentSession.projectPath) {
-      alert('请先在配置中设置项目路径');
-      switchTab('config');
-      return;
-    }
-
-    // 设置默认命令
-    const projectPath = state.currentSession.projectPath;
-    let defaultCommand = '';
-
-    // 根据项目类型推断默认启动命令
-    if (projectPath.includes('pom.xml') || projectPath.includes('pom.xml')) {
-      defaultCommand = 'mvn spring-boot:run';
-    } else if (projectPath.includes('build.gradle')) {
-      defaultCommand = 'gradle bootRun';
-    } else if (projectPath.includes('package.json')) {
-      defaultCommand = 'npm start';
-    } else if (projectPath.includes('.jar')) {
-      // 查找jar文件
-      const jarFiles = findJarFiles(projectPath);
-      defaultCommand = jarFiles.length > 0 ? `java -jar ${jarFiles[0]}` : 'java -jar your-app.jar';
-    } else {
-      defaultCommand = '请输入启动命令';
-    }
-
-    document.getElementById('startupCommand').value = defaultCommand;
-    document.getElementById('startupLog').style.display = 'none';
-    document.getElementById('btnStartValidation').disabled = false;
-    document.getElementById('btnStartValidation').textContent = '开始启动';
-    openModal('modalStartup');
+/** 打开启动验证对话框 */
+function validateStartup() {
+  if (!state.currentSession) { alert('请先选择会话'); return; }
+  if (!state.currentSession.projectPath) {
+    alert('请先在配置中设置项目路径');
+    switchTab('config');
+    return;
   }
 
-  /** 查找项目中的jar文件 */
-  function findJarFiles(projectPath) {
-    // 简单实现，实际项目中可能需要更复杂的扫描
-    const targetDir = projectPath;
-    const jars = [];
+  const projectPath = state.currentSession.projectPath;
+  let defaultCommand = '';
 
-    // 常见的jar位置
-    const possiblePaths = [
-      `${targetDir}/target/*.jar`,
-      `${targetDir}/*.jar`,
-      `${targetDir}/build/libs/*.jar`,
-      `${targetDir}/dist/*.jar`
-    ];
-
-    // 这里只是模拟，实际使用时需要真实的文件系统访问
-    return jars;
+  if (projectPath.includes('pom.xml')) {
+    defaultCommand = 'mvn spring-boot:run';
+  } else if (projectPath.includes('build.gradle')) {
+    defaultCommand = 'gradle bootRun';
+  } else if (projectPath.includes('package.json')) {
+    defaultCommand = 'npm start';
+  } else {
+    defaultCommand = '请输入启动命令';
   }
 
-  /** 执行启动验证 */
-  async function doStartupValidation() {
-    if (!state.currentSession) return;
+  document.getElementById('startupCommand').value = defaultCommand;
+  document.getElementById('startupLog').style.display = 'none';
+  document.getElementById('btnStartValidation').disabled = false;
+  document.getElementById('btnStartValidation').textContent = '开始启动';
+  openModal('modalStartup');
+}
 
-    const command = document.getElementById('startupCommand').value.trim();
-    if (!command) {
-      alert('请输入启动命令');
-      return;
+/** 执行启动验证 */
+async function doStartupValidation() {
+  if (!state.currentSession) return;
+
+  const command = document.getElementById('startupCommand').value.trim();
+  if (!command) {
+    alert('请输入启动命令');
+    return;
+  }
+
+  const btn = document.getElementById('btnStartValidation');
+  btn.disabled = true;
+  btn.textContent = '启动中...';
+
+  const logContent = document.querySelector('.log-content');
+  logContent.innerHTML = '';
+  document.getElementById('startupLog').style.display = 'block';
+
+  try {
+    const response = await fetch(`${API}/sessions/${state.currentSession.id}/validate-startup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startupCommand: command })
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: '请求失败' }));
+      throw new Error(err.error || '启动验证失败');
     }
 
-    const btn = document.getElementById('btnStartValidation');
-    btn.disabled = true;
-    btn.textContent = '启动中...';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
 
-    // 清空之前的日志
-    const logContent = document.querySelector('.log-content');
-    logContent.innerHTML = '';
-    document.getElementById('startupLog').style.display = 'block';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
 
-    // 流式接收启动日志
-    try {
-      const response = await fetch(`${API}/sessions/${state.currentSession.id}/validate-startup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startupCommand: command })
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ error: '请求失败' }));
-        throw new Error(err.error || '启动验证失败');
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data:')) {
-            try {
-              const data = JSON.parse(line.slice(5).trim());
-              if (data.type === 'system') {
-                addStartupLogLine(data.message, 'info');
-              }
-            } catch (e) {
-              // 忽略解析错误
+      for (const line of lines) {
+        if (line.startsWith('data:')) {
+          try {
+            const data = JSON.parse(line.slice(5).trim());
+            if (data.type === 'system') {
+              addStartupLogLine(data.message, 'info');
             }
+          } catch (e) {
+            // 忽略解析错误
           }
         }
       }
-
-    } catch (error) {
-      addStartupLogLine(`❌ 启动验证失败: ${error.message}`, 'error');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '开始启动';
     }
+  } catch (error) {
+    addStartupLogLine(`❌ 启动验证失败: ${error.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '开始启动';
+  }
+}
+
+/** 添加启动日志行 */
+function addStartupLogLine(message, type = 'info') {
+  const logContent = document.querySelector('.log-content');
+  const line = document.createElement('div');
+  line.className = `log-line ${type}`;
+  line.textContent = `${new Date().toLocaleTimeString()} - ${message}`;
+  logContent.appendChild(line);
+  logContent.scrollTop = logContent.scrollHeight;
+}
+
+/** 复制启动日志 */
+async function copyStartupLog() {
+  const logContent = document.querySelector('.log-content');
+  const logText = logContent.innerText;
+
+  if (!logText || logText.trim().length === 0) {
+    alert('没有可复制的日志');
+    return;
   }
 
-  /** 添加启动日志行 */
-  function addStartupLogLine(message, type = 'info') {
-    const logContent = document.querySelector('.log-content');
-    const line = document.createElement('div');
-    line.className = `log-line ${type}`;
-    line.textContent = `${new Date().toLocaleTimeString()} - ${message}`;
-    logContent.appendChild(line);
-    logContent.scrollTop = logContent.scrollHeight;
+  try {
+    await navigator.clipboard.writeText(logText);
+    const btn = event.target;
+    const originalContent = btn.innerHTML;
+    btn.innerHTML = '✅ 已复制';
+    btn.style.background = 'var(--accent)';
+    btn.style.color = '#000';
+    setTimeout(() => { btn.innerHTML = originalContent; btn.style.background = ''; btn.style.color = ''; }, 2000);
+
+    if (confirm('日志已复制到剪贴板！\n\n是否要立即分析此启动日志？')) {
+      if (state.currentSession) openModal('modalStartupLogAnalysis');
+    }
+  } catch (err) {
+    const textArea = document.createElement('textarea');
+    textArea.value = logText;
+    document.body.appendChild(textArea);
+    textArea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textArea);
   }
+}
 
-  /** 复制启动日志 */
-  async function copyStartupLog() {
-    const logContent = document.querySelector('.log-content');
-    const logText = logContent.innerText;
+/** 启动日志分析 */
+function analyzeStartupLog() {
+  if (!state.currentSession) { alert('请先选择会话'); return; }
 
-    if (!logText || logText.trim().length === 0) {
-      alert('没有可复制的日志');
-      return;
-    }
+  const logContent = document.getElementById('startupLogAnalysisContent');
+  if (!logContent.value.trim()) { alert('请先复制启动日志内容'); return; }
 
-    try {
-      await navigator.clipboard.writeText(logText);
+  closeModal('modalStartupLogAnalysis');
 
-      // 显示复制成功提示
-      const btn = event.target;
-      const originalContent = btn.innerHTML;
-      btn.innerHTML = '✅ 已复制';
-      btn.style.background = 'var(--accent)';
-      btn.style.color = '#000';
+  const analyzeMessage = `请分析以下启动日志，找出问题和解决方案：\n\n项目信息：\n` +
+    `- 数据库类型: ${state.currentSession.dbType || '未配置'}\n` +
+    `- 项目路径: ${state.currentSession.projectPath || '未配置'}\n\n` +
+    `启动日志内容：\n\`\`\`\n${logContent.value}\n\`\`\`\n\n` +
+    `请分析可能的问题并提供具体的修复建议。`;
 
-      setTimeout(() => {
-        btn.innerHTML = originalContent;
-        btn.style.background = '';
-        btn.style.color = '';
-      }, 2000);
-
-      // 询问用户是否要立即分析日志
-      if (confirm('日志已复制到剪贴板！\n\n是否要立即分析此启动日志？\n（可以自动粘贴日志内容进行分析）')) {
-        if (state.currentSession) {
-          openModal('modalStartupLogAnalysis');
-        }
-      }
-    } catch (err) {
-      // 降级方案
-      const textArea = document.createElement('textarea');
-      textArea.value = logText;
-      document.body.appendChild(textArea);
-      textArea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textArea);
-
-      const btn = event.target;
-      const originalContent = btn.innerHTML;
-      btn.innerHTML = '✅ 已复制';
-      btn.style.background = 'var(--accent)';
-      btn.style.color = '#000';
-
-      setTimeout(() => {
-        btn.innerHTML = originalContent;
-        btn.style.background = '';
-        btn.style.color = '';
-      }, 2000);
-    }
-  }
-
-  /** 启动日志分析 */
-  function analyzeStartupLog() {
-    if (!state.currentSession) {
-      alert('请先选择会话');
-      return;
-    }
-
-    const logContent = document.getElementById('startupLogAnalysisContent');
-    if (!logContent.value.trim()) {
-      alert('请先复制启动日志内容');
-      return;
-    }
-
-    // 关闭分析对话框
-    closeModal('modalStartupLogAnalysis');
-
-    // 在聊天中发送分析请求
-    const analyzeMessage = `请分析以下启动日志，找出问题和解决方案：
-
-项目信息：
-- 数据库类型: ${state.currentSession.dbType || '未配置'}
-- 项目路径: ${state.currentSession.projectPath || '未配置'}
-
-启动日志内容：
-\`\`\`
-${logContent.value}
-\`\`\`
-
-请分析可能的问题并提供具体的修复建议。`;
-
-    appendMessage('system', '🔍 正在分析启动日志...');
-    streamRequest(`${API}/sessions/${state.currentSession.id}/chat`, { message: analyzeMessage });
-  }
-});
+  appendMessage('system', '🔍 正在分析启动日志...');
+  streamRequest(`${API}/sessions/${state.currentSession.id}/chat`, { message: analyzeMessage });
+}
 
 // ==================== 系统状态 ====================
 async function checkStatus() {
@@ -1175,11 +1111,18 @@ async function testClaudeConnection() {
 
 // ==================== 数据库参考卡片 ====================
 const DB_REF = [
-  { name: '达梦 DM8',     port: '5236',  url: 'jdbc:dm://host:5236/DB',          driver: 'dm.jdbc.driver.DmDriver' },
-  { name: '人大金仓 KES', port: '54321', url: 'jdbc:kingbase8://host:54321/DB',   driver: 'com.kingbase8.Driver' },
-  { name: '华为 GaussDB', port: '8000',  url: 'jdbc:gaussdb://host:8000/DB',      driver: 'com.huawei.gaussdb.jdbc.Driver' },
-  { name: 'TiDB',         port: '4000',  url: 'jdbc:mysql://host:4000/DB',         driver: 'com.mysql.cj.jdbc.Driver' },
-  { name: '神通 Oscar',   port: '2003',  url: 'jdbc:oscar://host:2003/DB',         driver: 'com.oscar.Driver' },
+  { name: 'MySQL',          port: '3306',  url: 'jdbc:mysql://host:3306/DB',          driver: 'com.mysql.cj.jdbc.Driver' },
+  { name: '达梦 DM8',        port: '5236',  url: 'jdbc:dm://host:5236/DB',            driver: 'com.dm.jdbc.Driver' },
+  { name: '金仓 V8R6',       port: '54321', url: 'jdbc:kingbase8://host:54321/DB',    driver: 'com.kingbase8.Driver' },
+  { name: '金仓 V8R7',       port: '54321', url: 'jdbc:kingbase8://host:54321/DB',    driver: 'com.kingbase8.Driver' },
+  { name: '金仓 V9',         port: '54321', url: 'jdbc:kingbase8://host:54321/DB',    driver: 'com.kingbase8.Driver' },
+  { name: '神通',            port: '2003',  url: 'jdbc:oscar://host:2003/DB',          driver: 'com.shentong.jdbc.driver' },
+  { name: '瀚高',            port: '54321', url: 'jdbc:postgresql://host:54321/DB',   driver: 'com.highgo.jdbc.HGoDriver' },
+  { name: '海量',            port: '54321', url: 'jdbc:postgresql://host:54321/DB',   driver: 'com.vastbase.jdbc.Driver' },
+  { name: '优炫',            port: '54321', url: 'jdbc:postgresql://host:54321/DB',   driver: 'com.youxuan.jdbc.Driver' },
+  { name: '南大通用PG',      port: '54325', url: 'jdbc:postgresql://host:54325/DB',   driver: 'com.gbase8c.jdbc.Driver' },
+  { name: '虚谷',            port: '54321', url: 'jdbc:xugu://host:54321/DB',        driver: 'com.xugu.cloud.protocol.xugu.jdbc.Driver' },
+  { name: '崖山 YashanDB',   port: '54321', url: 'jdbc:yashandb://host:54321/DB',     driver: 'com.yashandb.jdbc.Driver' },
 ];
 function renderDbRefCards() {
   document.getElementById('dbRefCards').innerHTML = DB_REF.map(db => `

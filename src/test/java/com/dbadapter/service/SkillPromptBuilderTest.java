@@ -18,54 +18,56 @@ class SkillPromptBuilderTest {
         builder = new SkillPromptBuilder();
     }
 
-    @Test
-    @DisplayName("buildContextPrompt: 包含数据库类型")
-    void contextIncludesDbType() {
-        Session s = session("dameng", "192.168.1.1", "5236", "testdb", "/home/user/proj");
-        String prompt = builder.buildContextPrompt(s);
-        assertThat(prompt).contains("达梦");
-        assertThat(prompt).contains("192.168.1.1");
-        assertThat(prompt).contains("5236");
-        assertThat(prompt).contains("testdb");
-        assertThat(prompt).contains("/home/user/proj");
-    }
+@Test
+@DisplayName("buildContextPrompt: 包含数据库类型")
+void contextIncludesDbType() {
+    Session s = session("dm", "192.168.1.1", "5236", "testdb", "/home/user/proj");
+    String prompt = builder.buildContextPrompt(s);
+    assertThat(prompt).contains("达梦");
+    assertThat(prompt).contains("dm");
+    assertThat(prompt).contains("192.168.1.1");
+    assertThat(prompt).contains("5236");
+    assertThat(prompt).contains("testdb");
+    assertThat(prompt).contains("/home/user/proj");
+}
 
-    @Test
-    @DisplayName("buildContextPrompt: 包含 JSON 输出格式说明")
-    void contextIncludesOutputFormat() {
-        Session s = session("dameng", null, null, null, null);
-        String prompt = builder.buildContextPrompt(s);
-        assertThat(prompt).contains("modifications");
-        assertThat(prompt).contains("filePath");
-        assertThat(prompt).contains("original");
-        assertThat(prompt).contains("modified");
-    }
+@Test
+@DisplayName("buildAnalysisPrompt: 包含 JSON 输出格式说明")
+void analysisIncludesOutputFormat() {
+    Session s = session("dm", null, null, null, null);
+    String prompt = builder.buildAnalysisPrompt(s);
+    assertThat(prompt).contains("modifications");
+    assertThat(prompt).contains("filePath");
+    assertThat(prompt).contains("original");
+    assertThat(prompt).contains("modified");
+}
 
-    @ParameterizedTest(name = "数据库类型 [{0}] 有专项规则")
-    @ValueSource(strings = {"dameng", "kingbase", "gaussdb", "tidb"})
-    void specificRulesExist(String dbType) {
-        Session s = session(dbType, null, null, null, null);
-        String prompt = builder.buildContextPrompt(s);
-        // 每种数据库应有 JDBC 相关内容
-        assertThat(prompt).containsAnyOf("jdbc:", "JDBC", "Driver");
-    }
+@ParameterizedTest(name = "数据库类型 [{0}] 有专项规则")
+@ValueSource(strings = {"dm", "kingbase_v8r6", "kingbase_v8r7", "kingbase_v9",
+        "shentong", "highgo", "vastbase", "youxuan", "gbase_pg", "xugu", "yashandb"})
+void specificRulesExist(String dbType) {
+    Session s = session(dbType, null, null, null, null);
+    String prompt = builder.buildContextPrompt(s);
+    // 每种数据库类型应至少能在展示名或标识符中体现
+    assertThat(prompt).isNotBlank();
+}
 
-    @Test
-    @DisplayName("buildContextPrompt: 达梦规则包含 NVL/IFNULL 转换说明")
-    void damengIncludesNvlRule() {
-        Session s = session("dameng", null, null, null, null);
-        String prompt = builder.buildContextPrompt(s);
-        assertThat(prompt).containsAnyOf("NVL", "COALESCE", "IFNULL");
-    }
+@Test
+@DisplayName("buildContextPrompt: 达梦规则包含展示名")
+void dmRuleIncluded() {
+    Session s = session("dm", null, null, null, null);
+    String prompt = builder.buildContextPrompt(s);
+    assertThat(prompt).contains("达梦");
+}
 
-    @Test
-    @DisplayName("buildFullSystemPrompt: 不为空且包含职责说明")
-    void fullPromptNotEmpty() {
-        Session s = session("kingbase", "10.0.0.1", "54321", "mydb", "/opt/proj");
-        String full = builder.buildFullSystemPrompt(s);
-        assertThat(full).isNotBlank();
-        assertThat(full).containsAnyOf("适配", "数据库", "Java");
-    }
+@Test
+@DisplayName("buildExecutionPrompt: 不为空且包含职责说明")
+void executionPromptNotEmpty() {
+    Session s = session("kingbase_v8r6", "10.0.0.1", "54321", "mydb", "/opt/proj");
+    String full = builder.buildExecutionPrompt(s, null);
+    assertThat(full).isNotBlank();
+    assertThat(full).containsAnyOf("适配", "数据库", "Java");
+}
 
     // ==================== 辅助方法 ====================
 

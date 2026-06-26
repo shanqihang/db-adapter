@@ -175,13 +175,19 @@ claude:
 
 ## 支持的数据库
 
-| 数据库 | JDBC URL | Driver | MyBatis-Plus dbType |
-|--------|----------|--------|---------------------|
-| 达梦 DM8 | `jdbc:dm://host:5236/DB` | `dm.jdbc.driver.DmDriver` | `dm` |
-| 人大金仓 KingbaseES | `jdbc:kingbase8://host:54321/DB` | `com.kingbase8.Driver` | `kingbase_es` |
-| 华为 GaussDB | `jdbc:gaussdb://host:8000/DB` | `com.huawei.gaussdb.jdbc.Driver` | PostgreSQL 兼容 |
-| TiDB | `jdbc:mysql://host:4000/DB` | `com.mysql.cj.jdbc.Driver` | MySQL 兼容 |
-| 神通 Oscar | `jdbc:oscar://host:2003/DB` | `com.oscar.Driver` | - |
+| 数据库 | 产品 | JDBC URL | Driver | 标识符 (dbType) |
+|--------|------|----------|--------|-----------------|
+| 达梦 DM8 | 达梦DM8 | `jdbc:dm://host:5236/DB` | `com.dm.jdbc.Driver` | `dm` |
+| 金仓 V8R6 | KingbaseES V8R6 | `jdbc:kingbase8://host:54321/DB` | `com.kingbase8.Driver` | `kingbase_v8r6` |
+| 金仓 V8R7 | KingbaseES V8R7 | `jdbc:kingbase8://host:54321/DB` | `com.kingbase8.Driver` | `kingbase_v8r7` |
+| 金仓 V9 | KingbaseES V9 | `jdbc:kingbase8://host:54321/DB` | `com.kingbase8.Driver` | `kingbase_v9` |
+| 神通 | 神通Oscar | `jdbc:oscar://host:2003/DB` | `com.shentong.jdbc.driver` | `shentong` |
+| 瀚高 | HighGo | `jdbc:postgresql://host:54321/DB` | `com.highgo.jdbc.HGoDriver` | `highgo` |
+| 海量 | Vastbase | `jdbc:postgresql://host:54321/DB` | `com.vastbase.jdbc.Driver` | `vastbase` |
+| 优炫 | Youxuan | `jdbc:postgresql://host:54321/DB` | `com.youxuan.jdbc.Driver` | `youxuan` |
+| 南大通用PG | GBase 8c | `jdbc:postgresql://host:54325/DB` | `com.gbase8c.jdbc.Driver` | `gbase_pg` |
+| 虚谷 | Xugu | `jdbc:xugu://host:54321/DB` | `com.xugu.cloud.protocol.xugu.jdbc.Driver` | `xugu` |
+| 崖山 | YashanDB | `jdbc:yashandb://host:54321/DB` | `com.yashandb.jdbc.Driver` | `yashandb` |
 
 ## 全局 Skill 机制
 

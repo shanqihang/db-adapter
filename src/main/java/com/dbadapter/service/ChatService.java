@@ -59,7 +59,7 @@ public class ChatService {
     });
 
     private static final Pattern MODIFICATIONS_PATTERN = Pattern.compile(
-            "```json\\s*\\{\\s*\"modifications\"\\s*:[\\s\\S]*?\\}\\s*```",
+            "```json\\s*\\{[\\s\\S]*?\"modifications\"\\s*:[\\s\\S]*?\\}\\s*```",
             Pattern.DOTALL);
 
     // ==================== 对话（SSE 流式） ====================

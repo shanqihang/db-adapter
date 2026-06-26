@@ -19,7 +19,11 @@ public class Session {
     @Column(nullable = false)
     private String name;
 
-    /** 目标数据库类型：dameng / kingbase / gaussdb / tidb / oscar */
+    /**
+     * 目标数据库类型，可选值：
+     * mysql / dm / kingbase_v8r6 / kingbase_v8r7 / kingbase_v9 /
+     * shentong / highgo / vastbase / youxuan / gbase_pg / xugu / yashandb
+     */
     private String dbType;
 
     private String dbHost;

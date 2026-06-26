@@ -50,7 +50,7 @@ class ApiControllerTest {
     void createSession() throws Exception {
         Dto.SessionCreateReq req = new Dto.SessionCreateReq();
         req.setName("测试会话");
-        req.setDbType("dameng");
+        req.setDbType("dm");
         req.setProjectPath("/tmp/test-project");
 
         MvcResult result = mvc.perform(post("/api/sessions")
@@ -59,7 +59,7 @@ class ApiControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").isNotEmpty())
                 .andExpect(jsonPath("$.name").value("测试会话"))
-                .andExpect(jsonPath("$.dbType").value("dameng"))
+                .andExpect(jsonPath("$.dbType").value("dm"))
                 .andReturn();
 
         String id = json.readTree(result.getResponse().getContentAsString()).get("id").asText();
@@ -115,7 +115,7 @@ class ApiControllerTest {
 
         // 更新
         Dto.SessionUpdateReq update = new Dto.SessionUpdateReq();
-        update.setDbType("kingbase");
+        update.setDbType("kingbase_v8r6");
         update.setDbHost("192.168.1.100");
         update.setDbPort("54321");
         update.setProjectPath("/home/user/myproject");
@@ -124,7 +124,7 @@ class ApiControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(update)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.dbType").value("kingbase"))
+                .andExpect(jsonPath("$.dbType").value("kingbase_v8r6"))
                 .andExpect(jsonPath("$.dbHost").value("192.168.1.100"));
     }
 

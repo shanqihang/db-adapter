@@ -13,6 +13,28 @@ import org.springframework.stereotype.Component;
 @Component
 public class SkillPromptBuilder {
 
+    /** 数据库类型标识符 → 中文展示名 映射 */
+    private static final java.util.Map<String, String> DB_DISPLAY_NAMES = java.util.Map.ofEntries(
+            java.util.Map.entry("mysql", "MySQL"),
+            java.util.Map.entry("dm", "达梦 DM8"),
+            java.util.Map.entry("kingbase_v8r6", "金仓 V8R6"),
+            java.util.Map.entry("kingbase_v8r7", "金仓 V8R7"),
+            java.util.Map.entry("kingbase_v9", "金仓 V9"),
+            java.util.Map.entry("shentong", "神通"),
+            java.util.Map.entry("highgo", "瀚高 HighGo"),
+            java.util.Map.entry("vastbase", "海量 Vastbase"),
+            java.util.Map.entry("youxuan", "优炫"),
+            java.util.Map.entry("gbase_pg", "南大通用PG (GBase 8c)"),
+            java.util.Map.entry("xugu", "虚谷"),
+            java.util.Map.entry("yashandb", "崖山 YashanDB")
+    );
+
+    /** 获取数据库类型的中文展示名（找不到时回退为原始标识符） */
+    private String dbDisplayName(String dbType) {
+        if (dbType == null) return null;
+        return DB_DISPLAY_NAMES.getOrDefault(dbType, dbType);
+    }
+
     // ==================== 空闲模式提示词 ====================
 
     /**
@@ -152,7 +174,12 @@ public class SkillPromptBuilder {
         sb.append("## 当前适配任务上下文\n\n");
 
         if (session.getDbType() != null) {
-            sb.append("- **目标数据库类型**: ").append(session.getDbType()).append("\n");
+            String displayName = dbDisplayName(session.getDbType());
+            sb.append("- **目标数据库**: ").append(displayName);
+            if (!displayName.equals(session.getDbType())) {
+                sb.append(" (").append(session.getDbType()).append(")");
+            }
+            sb.append("\n");
         }
         if (session.getDbHost() != null) {
             sb.append("- **数据库地址**: ").append(session.getDbHost());
