@@ -1,156 +1,55 @@
-# 国产数据库适配 Skill 规则
+# Skills 目录说明
 
-## 全局 Skill 机制（推荐）
+本目录下的所有 skill 会在应用启动时自动复制到用户全局目录 `~/.claude/skills/`，让 Claude CLI 在适配任意路径下的项目时都能加载到这些 skill。
 
-本系统默认使用 **Claude Code 的全局 Skill 机制**，规则文件位于：
-- `~/.claude/CLAUDE.md`（用户全局配置）
-- `~/.claude/skills/`（Skill 包目录）
+## 目录结构
 
-### 优势
-- ✅ 规则可在多个项目间复用
-- ✅ 可通过 Git 管理 Skill 包版本
-- ✅ Claude CLI 自动加载，无需手动配置
-- ✅ 支持 Skill 包的依赖和组合
-
-### 配置方法
-
-1. 在 `~/.claude/CLAUDE.md` 中编写全局规则：
-
-```markdown
-# 国产数据库适配专家
-
-你是一名专业的国产数据库适配专家，专门帮助 Java 项目从 MySQL/Oracle/PostgreSQL 等数据库迁移到国产数据库。
-
-## 核心职责
-1. 分析 Java 项目的 pom.xml、配置文件、Mapper XML、Java 配置类
-2. 识别需要修改的内容，给出精确的修改建议
-3. 直接使用 Edit/Write 工具修改文件
-4. 保持代码风格与原项目一致
-
-## 达梦 DM8 适配规则
-
-**JDBC 依赖**
-```xml
-<dependency>
-    <groupId>com.dameng</groupId>
-    <artifactId>DmJdbcDriver18</artifactId>
-    <version>8.1.2.192</version>
-</dependency>
+```
+src/main/resources/skills/
+├── README.md                    # 本说明文件
+└── db-adapter/
+    └── SKILL.md                 # 国产数据库适配技能（核心）
 ```
 
-**连接配置**
-- URL: `jdbc:dm://HOST:5236/SCHEMA`
-- Driver: `dm.jdbc.driver.DmDriver`
-- Dialect: `org.hibernate.dialect.DmDialect`
+## 工作原理
 
-**SQL 转换规则**
-- `IFNULL(a,b)` → `NVL(a,b)` 或 `COALESCE(a,b)`
-- `DATE_FORMAT(d,'%Y-%m-%d')` → `TO_CHAR(d,'YYYY-MM-DD')`
-- `NOW()` → `SYSDATE` 或 `CURRENT_TIMESTAMP`
-- `GROUP_CONCAT(x)` → `WM_CONCAT(x)` 或 `LISTAGG(x,',') WITHIN GROUP (ORDER BY 1)`
-- `AUTO_INCREMENT` → `IDENTITY(1,1)` 或使用序列
+1. **打包**：`mvn package` 时，整个 `skills/` 目录会被打包进 JAR 的 classpath
+2. **启动**：`SkillInstaller.@PostConstruct` 读取 `classpath:skills/**`，递归复制到 `~/.claude/skills/`
+3. **使用**：Claude CLI 启动时（无论 CWD 是哪个项目），自动从 `~/.claude/skills/` 加载所有 skill
+4. **触发**：当用户消息中出现"数据库适配/MySQL 改造/达梦/金仓"等关键词时，Claude 自动加载 `db-adapter` skill
 
-## 人大金仓 KingbaseES 适配规则
+## 配置
 
-**JDBC 依赖**
-```xml
-<dependency>
-    <groupId>com.kingbase8</groupId>
-    <artifactId>kingbase8</artifactId>
-    <version>8.6.0</version>
-</dependency>
-```
-
-**连接配置**
-- URL: `jdbc:kingbase8://HOST:54321/DBNAME`
-- Driver: `com.kingbase8.Driver`
-- Dialect: `com.kingbase8.hibernate.dialect.KingbaseESDialect`
-
-**SQL 转换规则（兼容 PostgreSQL）**
-- `IFNULL(a,b)` → `COALESCE(a,b)`
-- `DATE_FORMAT(d,'%Y-%m-%d')` → `TO_CHAR(d,'YYYY-MM-DD')`
-- `AUTO_INCREMENT` → `SERIAL` 或 `BIGSERIAL`
-- `GROUP_CONCAT` → `STRING_AGG(x, ',')`
-
-## 华为 GaussDB 适配规则
-
-**JDBC 依赖**
-```xml
-<dependency>
-    <groupId>com.huawei.gauss</groupId>
-    <artifactId>gaussdb-jdbc</artifactId>
-    <version>8.1.0</version>
-</dependency>
-```
-
-**连接配置**
-- URL: `jdbc:gaussdb://HOST:8000/DBNAME`
-- Driver: `com.huawei.gaussdb.jdbc.Driver`
-- 兼容 PostgreSQL，可使用 PostgreSQL Dialect
-
-## 工作流程
-
-1. 用户提供项目路径和目标数据库类型
-2. 使用 Read 工具读取 pom.xml、配置文件、Mapper XML
-3. 分析需要修改的内容
-4. 使用 Edit 工具直接修改文件（系统会自动备份）
-5. 告知用户修改了哪些文件
-
-## 注意事项
-
-- 修改前先用 Read 工具读取文件内容
-- 使用 Edit 工具时，old_string 必须与文件内容完全匹配
-- 一次只修改一个文件的一处内容，避免冲突
-- 修改后告知用户可在"修改记录"中查看对比和回滚
-```
-
-2. 或者在 `~/.claude/skills/` 中创建 Skill 包：
-
-```bash
-mkdir -p ~/.claude/skills/db-adapter
-cat > ~/.claude/skills/db-adapter/skill.md << 'EOF'
-# 国产数据库适配 Skill
-...（规则内容同上）
-EOF
-```
-
-3. 在 `application.yml` 中确认启用全局 Skill：
-
+`application.yml`:
 ```yaml
 claude:
-  global-skill-enabled: true  # 默认值
+  skills:
+    auto-install: true       # 启动时自动安装（默认 true）
+    # target-dir:            # 留空使用 ~/.claude/skills，可指定其他路径
 ```
 
-## 本地 Skill 文件（已废弃）
+## 添加新 skill
 
-本目录下的 Skill 文件（`db-adapter.md`）已不再使用。系统改用全局 Skill 机制，通过 `--append-system-prompt` 只追加当前会话的数据库上下文（类型、地址、项目路径），不覆盖全局规则。
+1. 在 `src/main/resources/skills/` 下新建子目录，如 `my-skill/`
+2. 创建 `SKILL.md`，文件头必须包含 frontmatter：
+   ```markdown
+   ---
+   name: my-skill
+   description: 简要描述（一句话）
+   ---
 
-如果你仍需使用本地 Skill 文件，可以：
-1. 将规则复制到 `~/.claude/CLAUDE.md`
-2. 或在 `application.yml` 中设置 `global-skill-enabled: false`，系统会回退到使用 `SkillPromptBuilder.java` 中的内建规则
+   # 技能内容
+   ...
+   ```
+3. 重启应用，新 skill 会自动安装到 `~/.claude/skills/my-skill/SKILL.md`
 
-## 内建规则兜底
+## 升级 skill
 
-如果没有配置全局 Skill，系统会使用 `SkillPromptBuilder.java` 中的内建规则作为兜底。这些规则包含了常见国产数据库的基本适配知识，但不如全局 Skill 灵活和可维护。
+每次启动都会**覆盖**目标文件，确保用户全局目录中的 skill 始终与 JAR 内的最新版本一致。如需保留本地修改，可设置 `claude.skills.auto-install: false`。
 
-## 推荐实践
+## 与 `--append-system-prompt` 的协作
 
-1. **团队共享**：将 `~/.claude/skills/db-adapter/` 目录放入 Git 仓库，团队成员克隆后软链接到本地
-2. **版本管理**：Skill 规则随项目演进，可以打 tag 标记稳定版本
-3. **分层规则**：全局 CLAUDE.md 放通用规则，Skill 包放特定数据库的详细规则
-4. **测试验证**：修改 Skill 后，在测试项目上验证效果再推广
+- **skill 文件**：定义"如何做"——通用的适配规则、工作流、输出格式
+- **append-system-prompt**：定义"做什么"——本次会话的目标数据库、连接信息、项目路径
 
-## 故障排查
-
-**Q: 全局 Skill 没有生效？**
-- 检查 `~/.claude/CLAUDE.md` 文件是否存在
-- 运行 `claude` 命令，看启动日志是否加载了 Skill
-- 确认 `application.yml` 中 `global-skill-enabled: true`
-
-**Q: 如何验证 Skill 是否加载？**
-- 在对话中问 Claude："你的职责是什么？"
-- 如果回答包含"国产数据库适配专家"等关键词，说明 Skill 已加载
-
-**Q: 可以同时使用全局 Skill 和本地规则吗？**
-- 可以。全局 Skill 会先加载，然后 `--append-system-prompt` 追加本地上下文
-- 本地上下文包含：数据库类型、地址、项目路径等会话特定信息
+两者互补：skill 是知识库，append-system-prompt 是当前任务上下文。

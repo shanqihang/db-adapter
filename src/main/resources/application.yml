@@ -53,6 +53,12 @@ claude:
   # false: 不加载全局 Skill，只使用 --append-system-prompt
   global-skill-enabled: true
 
+  # Skill 自动安装（启动时把 classpath:skills/** 复制到 ~/.claude/skills/）
+  # 这样 claude CLI 在适配任意路径下的项目时都能加载到内置 skill
+  skills:
+    auto-install: true
+    # target-dir: 留空使用 ~/.claude/skills，可指定其他目录（如内网共享路径）
+
 logging:
   level:
     com.dbadapter: DEBUG

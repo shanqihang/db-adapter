@@ -43,6 +43,20 @@ class ApiControllerTest {
                 .andExpect(jsonPath("$.activeProcesses").isNumber());
     }
 
+    // ==================== /api/health ====================
+
+    @Test
+    @DisplayName("GET /api/health 返回 skill 安装目录和文件列表")
+    void healthEndpoint() throws Exception {
+        mvc.perform(get("/api/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.skillsInstallDir").isNotEmpty())
+                .andExpect(jsonPath("$.skillsInstallDirExists").isBoolean())
+                .andExpect(jsonPath("$.dbAdapterSkillReady").isBoolean())
+                .andExpect(jsonPath("$.skills").isArray())
+                .andExpect(jsonPath("$.message").isNotEmpty());
+    }
+
     // ==================== 会话 CRUD ====================
 
     @Test

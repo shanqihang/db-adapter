@@ -11,6 +11,7 @@ import com.dbadapter.service.ChatService;
 import com.dbadapter.service.ClaudeCliService;
 import com.dbadapter.service.ClaudeSessionManager;
 import com.dbadapter.service.FileService;
+import com.dbadapter.service.SkillInstaller;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
@@ -21,8 +22,11 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.*;
+import java.util.stream.Stream;
 
 @Slf4j
 @RestController
@@ -37,6 +41,7 @@ public class ApiController {
     private final ClaudeCliService claudeCliService;
     private final ClaudeSessionManager sessionManager;
     private final FileService fileService;
+    private final SkillInstaller skillInstaller;
 
     // ==================== 系统状态 ====================
 
@@ -50,6 +55,72 @@ public class ApiController {
                 "activeProcesses", claudeCliService.getActiveProcessCount(),
                 "message", cliOk ? "Claude CLI 可用" : "Claude CLI 不可用，请检查安装"
         ));
+    }
+
+    /**
+     * 健康检查：返回 skill 安装状态
+     *
+     * <p>暴露 {@link SkillInstaller#getInstallDir()} 以及该目录下已安装的 skill 列表，
+     * 方便排查"为什么 claude 没加载到 db-adapter skill"之类的问题。
+     */
+    @GetMapping("/health")
+    public ResponseEntity<?> health() {
+        Path installDir = skillInstaller.getInstallDir();
+        boolean dirExists = Files.isDirectory(installDir);
+
+        List<Map<String, Object>> skills = new ArrayList<>();
+        if (dirExists) {
+            try (Stream<Path> children = Files.list(installDir)) {
+                children.filter(Files::isDirectory)
+                        .sorted()
+                        .forEach(skillDir -> skills.add(describeSkill(skillDir)));
+            } catch (Exception e) {
+                log.warn("枚举 skill 目录失败: {}", e.getMessage());
+            }
+        }
+
+        // db-adapter skill 是否就绪（核心检查项）
+        Path dbAdapterSkill = installDir.resolve("db-adapter").resolve("SKILL.md");
+        boolean dbAdapterReady = Files.isRegularFile(dbAdapterSkill);
+
+        boolean cliOk = claudeCliService.isCliAvailable();
+        boolean overallOk = cliOk && dbAdapterReady;
+
+        return ResponseEntity.ok(Map.of(
+                "ok", overallOk,
+                "claudeCliAvailable", cliOk,
+                "skillsInstallDir", installDir.toString(),
+                "skillsInstallDirExists", dirExists,
+                "dbAdapterSkillReady", dbAdapterReady,
+                "skills", skills,
+                "message", overallOk
+                        ? "所有组件就绪"
+                        : (cliOk ? "db-adapter skill 未就绪，请检查启动日志" : "Claude CLI 不可用")
+        ));
+    }
+
+    /** 描述单个 skill 目录的安装状态 */
+    private Map<String, Object> describeSkill(Path skillDir) {
+        Map<String, Object> info = new LinkedHashMap<>();
+        info.put("name", skillDir.getFileName().toString());
+        info.put("path", skillDir.toString());
+
+        Path skillFile = skillDir.resolve("SKILL.md");
+        boolean exists = Files.isRegularFile(skillFile);
+        info.put("skillFileExists", exists);
+
+        if (exists) {
+            try {
+                BasicFileAttributes attrs = Files.readAttributes(skillFile, BasicFileAttributes.class);
+                info.put("sizeBytes", attrs.size());
+                info.put("lastModified", LocalDateTime.ofInstant(
+                        attrs.lastModifiedTime().toInstant(), ZoneId.systemDefault()).toString());
+            } catch (Exception e) {
+                info.put("error", "读取文件属性失败: " + e.getMessage());
+            }
+        }
+
+        return info;
     }
 
     // ==================== 会话管理 ====================

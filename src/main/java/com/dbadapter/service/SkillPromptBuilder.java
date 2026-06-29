@@ -6,9 +6,15 @@ import org.springframework.stereotype.Component;
 /**
  * 构建数据库适配的 System Prompt
  *
- * 两阶段工作流：
- *   分析阶段 (analysis)：只读取文件、输出适配方案，严禁使用 Edit/Write 工具修改任何文件
- *   执行阶段 (execution)：根据用户确认的方案，实际修改项目文件
+ * <p>权威知识来源：<code>~/.claude/skills/db-adapter/SKILL.md</code>
+ * （由 {@link SkillInstaller} 在启动时从 classpath 安装到用户全局目录）。
+ *
+ * <p>本类只负责注入两类信息：
+ * <ul>
+ *   <li>当前会话所处的模式（CHAT / ANALYSIS / EXECUTION）以及该模式下的强制约束</li>
+ *   <li>当前会话的上下文（目标数据库类型、地址、项目路径）</li>
+ * </ul>
+ * 具体的适配规则（驱动、URL、SQL 语法对照等）由 db-adapter skill 提供。
  */
 @Component
 public class SkillPromptBuilder {
@@ -29,17 +35,13 @@ public class SkillPromptBuilder {
             java.util.Map.entry("yashandb", "崖山 YashanDB")
     );
 
-    /** 获取数据库类型的中文展示名（找不到时回退为原始标识符） */
     private String dbDisplayName(String dbType) {
         if (dbType == null) return null;
         return DB_DISPLAY_NAMES.getOrDefault(dbType, dbType);
     }
 
-    // ==================== 空闲模式提示词 ====================
+    // ==================== 空闲/对话模式 ====================
 
-    /**
-     * 空闲/普通对话模式：自由对话，不限制工具使用
-     */
     public String buildIdlePrompt(Session session) {
         StringBuilder sb = new StringBuilder();
 
@@ -50,6 +52,8 @@ public class SkillPromptBuilder {
 
                 你是一个数据库适配助手，正在帮助用户将 Java 项目从 MySQL 适配到国产数据库。
                 你可以自由地和用户对话，回答问题，提供建议。
+
+                如需进行实际的适配分析或执行，请加载 **db-adapter** skill 获取完整适配规则。
 
                 ## 规则
 
@@ -65,16 +69,18 @@ public class SkillPromptBuilder {
         return sb.toString();
     }
 
-    // ==================== 分析阶段提示词 ====================
+    // ==================== 分析模式 ====================
 
-    /**
-     * 分析阶段：强约束，禁止修改文件
-     */
     public String buildAnalysisPrompt(Session session) {
         StringBuilder sb = new StringBuilder();
 
         sb.append("""
                 # 当前模式：分析模式（ANALYSIS MODE）
+
+                ## 先决条件
+
+                请先加载 **db-adapter** skill（位于 `~/.claude/skills/db-adapter/SKILL.md`），
+                其中包含 12 种国产数据库的完整适配规则、JDBC URL 格式、SQL 语法对照等知识库。
 
                 ## ⚠️ 严格规则 — 必须遵守
 
@@ -84,14 +90,17 @@ public class SkillPromptBuilder {
                 - ❌ **严禁对项目文件做任何写入操作**
 
                 如果违反此规则直接修改文件，用户的代码将被破坏，这是绝对不可接受的。
+                系统会自动回滚违规修改，并在日志中告警。
 
                 ## 你的任务
+
+                按照 db-adapter skill 中的"阶段 1：分析模式"工作流执行：
 
                 1. **扫描和分析**：仔细阅读项目的 pom.xml、配置文件、Mapper XML、Java 配置类等
                 2. **识别问题**：找出所有需要适配的数据库相关代码
                 3. **输出适配方案**：在回复末尾以 JSON 格式列出所有需要修改的内容
 
-                ## 输出格式
+                ## 输出格式（必须严格遵守 — 后端解析器依赖此格式）
 
                 分析完成后，必须在回复末尾附加如下 JSON 块：
 
@@ -118,27 +127,25 @@ public class SkillPromptBuilder {
                 """);
 
         sb.append(buildContextPrompt(session));
-        sb.append("\n");
-        sb.append("## 适配规则\n\n");
-        sb.append("请使用 init-db-adapt Skill 中掌握的数据库适配知识，针对目标数据库类型进行适配。\n");
 
         return sb.toString();
     }
 
-    // ==================== 执行阶段提示词 ====================
+    // ==================== 执行模式 ====================
 
-    /**
-     * 执行阶段：根据确认的方案执行修改
-     */
     public String buildExecutionPrompt(Session session, String approvedPlanSummary) {
         StringBuilder sb = new StringBuilder();
 
         sb.append("""
                 # 当前模式：执行模式（EXECUTION MODE）
 
+                ## 先决条件
+
+                请先加载 **db-adapter** skill（位于 `~/.claude/skills/db-adapter/SKILL.md`）以参考适配规则细节。
+
                 ## 你的任务
 
-                用户已确认了适配方案，请按照方案**逐项执行修改**：
+                用户已确认了适配方案，请按照 db-adapter skill 中的"阶段 2：执行模式"工作流**逐项执行修改**：
                 - 使用 Edit 或 Write 工具修改项目文件
                 - 严格按照方案中的 original 和 modified 内容进行替换
                 - 每完成一处修改，简要确认
@@ -163,11 +170,8 @@ public class SkillPromptBuilder {
         return sb.toString();
     }
 
-    // ==================== 通用上下文（追加到 Skill 后面） ====================
+    // ==================== 会话上下文 ====================
 
-    /**
-     * 构建追加到 Skill 后面的上下文提示（数据库类型、地址等）
-     */
     public String buildContextPrompt(Session session) {
         StringBuilder sb = new StringBuilder();
 
@@ -195,5 +199,4 @@ public class SkillPromptBuilder {
 
         return sb.toString();
     }
-
 }
